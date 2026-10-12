@@ -1,0 +1,18 @@
+kind: Pod
+apiVersion: v1
+metadata:
+ name: nginx-pod
+ namespace: nginx
+ labels:
+  app: nginx
+spec:
+ containers:
+ - name: nginx-container
+   image: nginx:latest
+   ports:
+   - containerPort: 80
+   tolerations: #this pod now can run in a node which is being tainted by "kubectl taint node worker-node-0 prod=true:NoSchedule"
+   - key: "prod"
+     operatior: "Equal"
+     value: "true"
+     effect: "NoSchedule"

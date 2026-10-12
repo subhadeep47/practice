@@ -1,0 +1,12 @@
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Terraform
+/terraform/.terraform/
+
+# Node dependencies
+/basicPractice/node_modules/
+/reactPractice/node_modules/
