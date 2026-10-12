@@ -10,3 +10,6 @@
 # Node dependencies
 /basicPractice/node_modules/
 /reactPractice/node_modules/
+
+# environment variables or secrets
+.env/
