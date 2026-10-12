@@ -6,6 +6,8 @@
 
 # Terraform
 /terraform/.terraform/
+/terraform/terraform.tfstate
+/terraform/terraform.tfstate.backup
 
 # Node dependencies
 /basicPractice/node_modules/
