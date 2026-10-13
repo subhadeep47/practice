@@ -13,3 +13,7 @@ variable "ec2_root_storage" {
   default = 15 # In GB
   type = number
 }
+
+variable "env" {
+  default = "dev"
+}
