@@ -11,6 +11,9 @@
 /remote-backend-terraform/.terraform/
 /remote-backend-terraform/terraform.tfstate
 /remote-backend-terraform/terraform.tfstate.backup
+/infra-app/.terraform/
+/infra-app/terraform.tfstate
+/infra-app/terraform.tfstate.backup
 
 # Node dependencies
 /basicPractice/node_modules/
