@@ -38,3 +38,30 @@ let assignedRoles:Record<SiteRoles, string> = {
     User: 'Partha',
     Guest: 'ABCD'
 }
+
+// Extracting the inner resolved value of a Promise
+type UnwrappedPromise<T> = T extends Promise<infer U> ? U : T;
+
+type ResponseData = UnwrappedPromise<Promise<{ id: string }>>;
+
+async function random() {
+    let response: ResponseData = await Promise.resolve({id: "user123"});   
+}
+
+// Extracts the return type of a given function type
+type GetReturnType<T> = T extends (...args: any[]) => infer R ? R : never;
+
+const getLength = () => 42;
+type ReturnOfLength = GetReturnType<typeof getLength>;
+
+//
+type Config = Record<string, string | number>;
+
+// Using 'satisfies' keeps the specific value type intact
+const palette = {
+  primary: "#ff0000",
+  accent: 123
+} satisfies Config;
+
+// Safe to invoke string methods because TS knows 'primary' is string literal, not 'string | number'
+palette.primary.toUpperCase(); 
