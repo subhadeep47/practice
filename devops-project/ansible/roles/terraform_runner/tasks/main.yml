@@ -2,20 +2,24 @@
 # tasks file for terraform_runner
 - name: Run Terraform for service -> {{ tf_service }}
   block:
-    - name: Initialize and Apply Terraform
-      community.general.terraform:
-        project_path: "{{ playbook_dir }}/../../terraform/{{ tf_service }}"
-        state: "present"
-        force_init: true
-        variables_files:
-          - "environments/{{ target_env }}.tfvars"
-      register: terraform_result
+    - name: Initialize Terraform in {{ tf_service }}
+      ansible.builtin.command:
+        cmd: terraform init
+        chdir: "{{ playbook_dir }}/../../terraform/{{ tf_service }}"
 
-    - name: Print Terraform Output for debugging
+    - name: Apply Terraform in {{ tf_service }} for environment {{ target_env }}
+      ansible.builtin.command:
+        cmd: >
+          terraform apply -auto-approve 
+          -var-file="environments/{{ target_env }}.tfvars"
+        chdir: "{{ playbook_dir }}/../../terraform/{{ tf_service }}"
+      register: terraform_apply_result
+
+    - name: Display Terraform output for {{ tf_service }}
       ansible.builtin.debug:
-        msg: "{{ terraform_result.stdout }}"
+        msg: "{{ terraform_apply_result.stdout }}"
 
   rescue:
-    - name: Fail with detailed error message
+    - name: Fail gracefully if Terraform fails
       ansible.builtin.fail:
-        msg: "Terraform failed for {{ tf_service }}. Error output: {{ terraform_result.stderr | default(terraform_result.msg) }}"
+        msg: "Terraform execution failed for service: {{ tf_service }}"
