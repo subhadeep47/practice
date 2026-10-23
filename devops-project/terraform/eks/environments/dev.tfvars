@@ -1,0 +1,9 @@
+environment         = "dev"
+aws_region          = "us-east-1"
+cluster_version     = "1.28"
+node_instance_types = ["t3.medium"]
+desired_size        = 2
+min_size            = 1
+max_size            = 3
+vpc_id              = "vpc-0123456789abcdef0" # Or dynamically referenced via remote state/Ansible
+subnet_ids          = ["subnet-0123456789abcdef1", "subnet-0123456789abcdef2"]

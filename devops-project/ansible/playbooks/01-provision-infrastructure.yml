@@ -1,0 +1,32 @@
+- name: Provision Full-Stack Infrastructure via Terraform
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    target_env: "{{ env | default('dev') }}"
+
+  tasks:
+    - name: 1. Provision VPC (Networking Foundation)
+      ansible.builtin.include_role:
+        name: terraform_runner
+      vars:
+        tf_service: "vpc"
+
+    - name: 2. Provision EKS (Kubernetes Cluster for Spring Boot & React)
+      ansible.builtin.include_role:
+        name: terraform_runner
+      vars:
+        tf_service: "eks"
+
+    - name: 3. Provision RDS (PostgreSQL Database for Spring Boot)
+      ansible.builtin.include_role:
+        name: terraform_runner
+      vars:
+        tf_service: "rds"
+
+    - name: 4. Provision S3 + CloudFront (React Frontend CDN)
+      ansible.builtin.include_role:
+        name: terraform_runner
+      vars:
+        tf_service: "s3-cloudfront"
