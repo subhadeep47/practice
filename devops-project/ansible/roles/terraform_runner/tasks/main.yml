@@ -1,3 +1,23 @@
 #SPDX-License-Identifier: MIT-0
 ---
 # tasks file for terraform_runner
+---
+- name: Run Terraform for service -> {{ tf_service }}
+  block:
+    - name: Initialize and Apply Terraform
+      community.general.terraform:
+        project_path: "{{ playbook_dir }}/../../terraform/{{ tf_service }}"
+        state: "present"
+        force_init: true
+        variables_files:
+          - "environments/{{ target_env }}.tfvars"
+      register: terraform_result
+
+    - name: Print Terraform Output for debugging
+      ansible.builtin.debug:
+        msg: "{{ terraform_result.stdout }}"
+
+  rescue:
+    - name: Fail with detailed error message
+      ansible.builtin.fail:
+        msg: "Terraform failed for {{ tf_service }}. Error output: {{ terraform_result.stderr | default(terraform_result.msg) }}"
