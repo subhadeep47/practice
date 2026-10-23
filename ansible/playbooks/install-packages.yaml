@@ -1,0 +1,32 @@
+---
+# Playbook: Install packages across all OS types
+# Run: ansible-playbook plabooks/install_packages.yml
+
+- name: Install common utility packages
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Install tree
+      package:
+        name: tree
+        state: present
+
+    - name: Install wget
+      package:
+        name: wget
+        state: present
+
+    - name: Install vim
+      package:
+        name: vim
+        state: present
+
+    - name: Verify tree is installed
+      command: tree --version
+      changed_when: false
+      register: tree_version
+
+    - name: Show tree version
+      debug:
+        msg: "{{ tree_version.stdout }}"
