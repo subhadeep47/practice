@@ -1,7 +1,5 @@
 #SPDX-License-Identifier: MIT-0
----
 # tasks file for terraform_runner
----
 - name: Run Terraform for service -> {{ tf_service }}
   block:
     - name: Initialize and Apply Terraform
