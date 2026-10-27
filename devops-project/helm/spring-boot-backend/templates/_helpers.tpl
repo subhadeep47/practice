@@ -51,6 +51,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Name of the Secret holding the database credentials
+*/}}
+{{- define "spring-boot-backend.dbSecretName" -}}
+{{- default (printf "%s-db" (include "spring-boot-backend.fullname" .)) .Values.database.existingSecret }}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "spring-boot-backend.serviceAccountName" -}}

@@ -55,3 +55,32 @@ aws eks update-kubeconfig --name app-cluster-dev --region us-east-1
 kubectl -n argocd port-forward svc/argocd-server 8080:443
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
 ```
+
+## Backend Helm chart (`helm/spring-boot-backend`)
+
+- Probes use Spring Boot Actuator (`/actuator/health/liveness` and `/readiness`), so the
+  app needs `spring-boot-starter-actuator`.
+- The container runs as non-root with a read-only root filesystem (`/tmp` is an emptyDir).
+- DB settings: `database.host` (terraform output `db_endpoint`), and credentials from a
+  Kubernetes Secret with keys `username` and `password`. Either point
+  `database.existingSecret` at one, or set `externalSecret.enabled=true` and
+  `externalSecret.remoteSecretId` (output `db_master_secret_arn`) to sync the
+  RDS-managed secret via External Secrets Operator. The operator, its IAM role and a
+  `ClusterSecretStore` are not installed by this repo yet.
+- Never deploy with `image.tag: latest`; CI should set an immutable tag (git SHA).
+
+```bash
+helm lint helm/spring-boot-backend -f helm/spring-boot-backend/values-dev.yaml
+helm template backend helm/spring-boot-backend -f helm/spring-boot-backend/values-dev.yaml
+```
+
+## Frontend (`terraform/s3-cloudfront`)
+
+Private S3 bucket behind CloudFront (origin access control, HTTPS only, managed cache and
+security-header policies). 403/404 fall back to `/index.html` so React Router deep links
+work. Deploy a build with:
+
+```bash
+aws s3 sync build/ s3://<s3_bucket_name> --delete
+aws cloudfront create-invalidation --distribution-id <cloudfront_distribution_id> --paths "/index.html"
+```

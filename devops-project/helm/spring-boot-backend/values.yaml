@@ -1,166 +1,156 @@
 # Default values for spring-boot-backend.
-# This is a YAML-formatted file.
-# Declare variables to be passed into your templates.
+# Environment-specific overrides live in values-<env>.yaml (e.g. values-dev.yaml).
 
-# This will set the replicaset count more information can be found here: https://kubernetes.io/docs/concepts/workloads/controllers/replicaset/
 replicaCount: 1
 
-# This sets the container image more information can be found here: https://kubernetes.io/docs/concepts/containers/images/
 image:
-  repository: your-dockerhub-username/spring-boot-backend #my dockerhub repo for backend image
-  # This sets the pull policy for images.
+  # TODO: replace with your registry/repo for the backend image
+  repository: your-dockerhub-username/spring-boot-backend
   pullPolicy: IfNotPresent
-  # Overrides the image tag whose default is the chart appVersion.
-  tag: "latest"
+  # Empty = use the chart appVersion. CI should set an immutable tag (e.g. the git SHA), never "latest".
+  tag: ""
 
-# This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
 imagePullSecrets: []
-# This is to override the chart name.
 nameOverride: ""
 fullnameOverride: ""
 
-# This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:
-  # Specifies whether a service account should be created.
   create: true
-  # Automatically mount a ServiceAccount's API credentials?
   automount: true
-  # Annotations to add to the service account.
+  # Annotate with an IAM role ARN here if the pod ever needs AWS access via IRSA.
   annotations: {}
-  # The name of the service account to use.
-  # If not set and create is true, a name is generated using the fullname template.
   name: ""
 
-# This is for setting Kubernetes Annotations to a Pod.
-# For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
 podAnnotations: {}
-# This is for setting Kubernetes Labels to a Pod.
-# For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
 podLabels: {}
 
-podSecurityContext: {}
-  # fsGroup: 2000
+# Run as a non-root user with a locked-down container. The image must run as a
+# numeric non-root user (uid 1000 here).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
 
-securityContext: {}
-  # capabilities:
-  #   drop:
-  #   - ALL
-  # readOnlyRootFilesystem: true
-  # runAsNonRoot: true
-  # runAsUser: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
 
-# This is for setting up a service more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/
+# Port the Spring Boot app listens on inside the container (server.port).
+containerPort: 8080
+
 service:
-  # This sets the service type more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types
   type: ClusterIP
-  # This sets the ports more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#field-spec-ports
   port: 8080
 
-# This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
+# Ingress needs a controller (e.g. AWS Load Balancer Controller) installed in the cluster.
 ingress:
   enabled: false
   className: ""
   annotations: {}
-    # kubernetes.io/ingress.class: nginx
-    # kubernetes.io/tls-acme: "true"
   hosts:
     - host: chart-example.local
       paths:
         - path: /
           pathType: ImplementationSpecific
   tls: []
-    # - secretName: chart-example-tls
-    #   hosts:
-    #     - chart-example.local
 
-# -- Expose the service via gateway-api HTTPRoute
-# Requires Gateway API resources and suitable controller installed within the cluster
-# (see: https://gateway-api.sigs.k8s.io/guides/)
+# Gateway API HTTPRoute (requires a Gateway controller).
 httpRoute:
-  # HTTPRoute enabled.
   enabled: false
-  # HTTPRoute annotations.
   annotations: {}
-  # Which Gateways this Route is attached to.
   parentRefs:
-  - name: gateway
-    sectionName: http
-    # namespace: default
-  # Hostnames matching HTTP header.
+    - name: gateway
+      sectionName: http
   hostnames:
-  - chart-example.local
-  # List of rules and filters applied.
+    - chart-example.local
   rules:
-  - matches:
-    - path:
-        type: PathPrefix
-        value: /headers
-  #   filters:
-  #   - type: RequestHeaderModifier
-  #     requestHeaderModifier:
-  #       set:
-  #       - name: My-Overwrite-Header
-  #         value: this-is-the-only-value
-  #       remove:
-  #       - User-Agent
-  # - matches:
-  #   - path:
-  #       type: PathPrefix
-  #       value: /echo
-  #     headers:
-  #     - name: version
-  #       value: v2
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /headers
 
-resources: {}
-  # We usually recommend not to specify default resources and to leave this as a conscious
-  # choice for the user. This also increases chances charts run on environments with little
-  # resources, such as Minikube. If you do want to specify resources, uncomment the following
-  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
-  # limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  # requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+# JVM sizing: memory limit is the hard ceiling, MaxRAMPercentage keeps the heap below it.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
 
-# This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+# Spring Boot Actuator health groups. Requires spring-boot-starter-actuator in the app
+# (probe endpoints are enabled automatically when running on Kubernetes).
+startupProbe:
+  httpGet:
+    path: /actuator/health/liveness
+    port: http
+  periodSeconds: 5
+  failureThreshold: 30 # up to 150s for the JVM + Spring context + DB connection to come up
 livenessProbe:
   httpGet:
-    path: /
+    path: /actuator/health/liveness
     port: http
+  periodSeconds: 10
+  failureThreshold: 3
 readinessProbe:
   httpGet:
-    path: /
+    path: /actuator/health/readiness
     port: http
+  periodSeconds: 10
+  failureThreshold: 3
 
-# This section is for setting up autoscaling more information can be found here: https://kubernetes.io/docs/concepts/workloads/autoscaling/
 autoscaling:
   enabled: false
   minReplicas: 1
-  maxReplicas: 100
+  maxReplicas: 5
   targetCPUUtilizationPercentage: 80
   # targetMemoryUtilizationPercentage: 80
 
-# Additional volumes on the output Deployment definition.
-volumes: []
-  # - name: foo
-  #   secret:
-  #     secretName: mysecret
-  #     optional: false
+# /tmp must be writable because the root filesystem is read-only (Tomcat uses it).
+volumes:
+  - name: tmp
+    emptyDir: {}
 
-# Additional volumeMounts on the output Deployment definition.
-volumeMounts: []
-  # - name: foo
-  #   mountPath: "/etc/foo"
-  #   readOnly: true
+volumeMounts:
+  - name: tmp
+    mountPath: /tmp
 
 nodeSelector: {}
-
 tolerations: []
-
 affinity: {}
 
-env:
-  spring_profiles_active: "local"
-  # You can inject your RDS database host here later or via Kubernetes Secrets
-  db_host: "your-rds-endpoint.rds.amazonaws.com"
+# ---- Application configuration -------------------------------------------------
+
+springProfile: "default"
+
+# Plain environment variables added to the container.
+extraEnv:
+  JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=75.0"
+
+# PostgreSQL connection. Host comes from the RDS stack (terraform output db_endpoint).
+database:
+  host: ""
+  port: 5432
+  name: appdb
+  # Existing Kubernetes Secret holding the DB credentials. If empty, the secret is named
+  # <release fullname>-db (the name the ExternalSecret below creates).
+  existingSecret: ""
+  secretKeys:
+    username: username
+    password: password
+
+# Optional: sync the RDS-managed master credentials from AWS Secrets Manager into the
+# cluster using External Secrets Operator (must be installed, with a SecretStore configured).
+externalSecret:
+  enabled: false
+  apiVersion: external-secrets.io/v1
+  refreshInterval: 1h
+  secretStoreName: aws-secrets-manager
+  secretStoreKind: ClusterSecretStore
+  # Secrets Manager secret name or ARN (terraform output db_master_secret_arn).
+  remoteSecretId: ""

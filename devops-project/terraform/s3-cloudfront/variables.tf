@@ -11,6 +11,12 @@ variable "aws_region" {
 
 variable "bucket_name_prefix" {
   type        = string
-  description = "Prefix for the frontend S3 bucket name"
+  description = "Prefix for the frontend S3 bucket name (S3 names are global; make it unique to you)"
   default     = "app-frontend-assets"
+}
+
+variable "price_class" {
+  type        = string
+  description = "CloudFront price class (PriceClass_100 = US, Canada, Europe)"
+  default     = "PriceClass_100"
 }

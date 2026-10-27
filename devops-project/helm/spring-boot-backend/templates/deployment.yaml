@@ -42,8 +42,12 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: {{ .Values.service.port }}
+              containerPort: {{ .Values.containerPort }}
               protocol: TCP
+          {{- with .Values.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}
@@ -62,9 +66,23 @@ spec:
           {{- end }}
           env:
             - name: SPRING_PROFILES_ACTIVE
-              value: "{{ .Values.env.spring_profiles_active }}"
-            - name: DB_HOST
-              value: "{{ .Values.env.db_host }}"
+              value: {{ .Values.springProfile | quote }}
+            - name: SPRING_DATASOURCE_URL
+              value: {{ printf "jdbc:postgresql://%s:%v/%s" (required "database.host is required" .Values.database.host) .Values.database.port .Values.database.name | quote }}
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "spring-boot-backend.dbSecretName" . }}
+                  key: {{ .Values.database.secretKeys.username }}
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "spring-boot-backend.dbSecretName" . }}
+                  key: {{ .Values.database.secretKeys.password }}
+            {{- range $name, $value := .Values.extraEnv }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
       {{- with .Values.volumes }}
       volumes:
         {{- toYaml . | nindent 8 }}

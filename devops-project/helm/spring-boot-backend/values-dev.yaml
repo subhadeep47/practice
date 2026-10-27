@@ -1,0 +1,12 @@
+# Overrides for the dev environment. Fill the two TODOs from the Terraform outputs of the rds stack.
+replicaCount: 2
+
+springProfile: dev
+
+database:
+  host: "" # TODO: terraform output db_endpoint (rds stack)
+  name: appdb
+
+externalSecret:
+  enabled: true
+  remoteSecretId: "" # TODO: terraform output db_master_secret_arn (rds stack)
