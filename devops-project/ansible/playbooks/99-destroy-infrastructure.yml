@@ -1,0 +1,37 @@
+---
+# Tear the stack down in reverse dependency order.
+# Run from the devops-project folder:
+#   ansible-playbook ansible/playbooks/99-destroy-infrastructure.yml
+- name: Destroy Full-Stack Infrastructure via Terraform
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    target_env: dev
+    tf_action: destroy
+    tf_services:
+      - s3-cloudfront
+      - rds
+      - eks
+      - vpc
+
+  vars_prompt:
+    - name: destroy_confirmation
+      prompt: "This destroys ALL infrastructure. Type the environment name to confirm"
+      private: false
+
+  pre_tasks:
+    - name: Confirm destroy
+      ansible.builtin.assert:
+        that: destroy_confirmation == target_env
+        fail_msg: "Confirmation did not match environment '{{ target_env }}'. Aborting."
+        quiet: true
+
+  tasks:
+    - name: Destroy each stack in reverse order
+      ansible.builtin.include_role:
+        name: terraform_runner
+      loop: "{{ tf_services }}"
+      loop_control:
+        loop_var: tf_service

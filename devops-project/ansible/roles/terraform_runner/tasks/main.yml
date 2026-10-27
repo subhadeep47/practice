@@ -1,25 +1,54 @@
 #SPDX-License-Identifier: MIT-0
 # tasks file for terraform_runner
-- name: Run Terraform for service -> {{ tf_service }}
+#
+# Required variable: tf_service (name of a folder under tf_root)
+# Optional: target_env, tf_action, tf_bin, tf_root (see defaults/main.yml)
+- name: Validate role inputs
+  ansible.builtin.assert:
+    that:
+      - tf_service is defined
+      - tf_action in ['plan', 'apply', 'destroy']
+    fail_msg: "tf_service must be set and tf_action must be one of plan, apply, destroy"
+    quiet: true
+
+- name: "Run Terraform {{ tf_action }} for service -> {{ tf_service }}"
+  vars:
+    tf_dir: "{{ tf_root }}/{{ tf_service }}"
+    tf_action_args: >-
+      {{ ['-input=false']
+         + ([] if tf_action == 'plan' else ['-auto-approve'])
+         + ['-var-file=environments/' ~ target_env ~ '.tfvars'] }}
+  environment:
+    TF_IN_AUTOMATION: "1"
   block:
-    - name: Initialize Terraform in {{ tf_service }}
+    - name: "Initialize Terraform in {{ tf_service }} (remote backend)"
       ansible.builtin.command:
-        cmd: terraform init
-        chdir: "{{ playbook_dir }}/../../terraform/{{ tf_service }}"
+        argv:
+          - "{{ tf_bin }}"
+          - init
+          - -input=false
+          - -reconfigure
+          - "-backend-config=environments/{{ target_env }}.backend.hcl"
+        chdir: "{{ tf_dir }}"
+      changed_when: false
 
-    - name: Apply Terraform in {{ tf_service }} for environment {{ target_env }}
+    - name: "Terraform {{ tf_action }} in {{ tf_service }} for environment {{ target_env }}"
       ansible.builtin.command:
-        cmd: >
-          terraform apply -auto-approve 
-          -var-file="environments/{{ target_env }}.tfvars"
-        chdir: "{{ playbook_dir }}/../../terraform/{{ tf_service }}"
-      register: terraform_apply_result
+        argv: "{{ [tf_bin, tf_action] + tf_action_args }}"
+        chdir: "{{ tf_dir }}"
+      register: tf_result
+      changed_when:
+        - tf_action != 'plan'
+        - "'0 added, 0 changed, 0 destroyed' not in tf_result.stdout"
+        - "'Resources: 0 destroyed' not in tf_result.stdout"
 
-    - name: Display Terraform output for {{ tf_service }}
+    - name: "Display Terraform output for {{ tf_service }}"
       ansible.builtin.debug:
-        msg: "{{ terraform_apply_result.stdout }}"
+        msg: "{{ tf_result.stdout_lines }}"
 
   rescue:
-    - name: Fail gracefully if Terraform fails
+    - name: "Fail with Terraform error details"
       ansible.builtin.fail:
-        msg: "Terraform execution failed for service: {{ tf_service }}"
+        msg: >-
+          Terraform {{ tf_action }} failed for service '{{ tf_service }}'.
+          {{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('')) }}

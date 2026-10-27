@@ -1,32 +1,27 @@
+---
+# Provision the full stack, in dependency order:
+#   vpc -> eks (reads vpc state) -> rds (reads vpc + eks state) -> s3-cloudfront
+#
+# Run from the devops-project folder:
+#   ansible-playbook ansible/playbooks/01-provision-infrastructure.yml
+#   ansible-playbook ansible/playbooks/01-provision-infrastructure.yml -e tf_action=plan
+#   ansible-playbook ansible/playbooks/01-provision-infrastructure.yml -e target_env=dev
 - name: Provision Full-Stack Infrastructure via Terraform
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars:
-    target_env: "{{ env | default('dev') }}"
+    tf_services:
+      - vpc            # Networking foundation
+      - eks            # Kubernetes cluster + Argo CD
+      - rds            # PostgreSQL for Spring Boot
+      - s3-cloudfront  # React frontend CDN
 
   tasks:
-    - name: 1. Provision VPC (Networking Foundation)
+    - name: Run Terraform for each stack in order
       ansible.builtin.include_role:
-        name: "../../roles/terraform_runner"
-      vars:
-        tf_service: "vpc"
-
-    - name: 2. Provision EKS (Kubernetes Cluster for Spring Boot & React)
-      ansible.builtin.include_role:
-        name: "../../roles/terraform_runner"
-      vars:
-        tf_service: "eks"
-
-    - name: 3. Provision RDS (PostgreSQL Database for Spring Boot)
-      ansible.builtin.include_role:
-        name: "../../roles/terraform_runner"
-      vars:
-        tf_service: "rds"
-
-    - name: 4. Provision S3 + CloudFront (React Frontend CDN)
-      ansible.builtin.include_role:
-        name: "../../roles/terraform_runner"
-      vars:
-        tf_service: "s3-cloudfront"
+        name: terraform_runner
+      loop: "{{ tf_services }}"
+      loop_control:
+        loop_var: tf_service

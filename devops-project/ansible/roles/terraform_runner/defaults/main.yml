@@ -1,3 +1,16 @@
 #SPDX-License-Identifier: MIT-0
 ---
 # defaults file for terraform_runner
+
+# Environment to deploy; selects environments/<target_env>.tfvars and
+# environments/<target_env>.backend.hcl inside each Terraform stack.
+target_env: dev
+
+# plan | apply | destroy
+tf_action: apply
+
+# Terraform executable
+tf_bin: terraform
+
+# Folder containing the Terraform stacks (vpc, eks, rds, s3-cloudfront)
+tf_root: "{{ playbook_dir }}/../../terraform"
