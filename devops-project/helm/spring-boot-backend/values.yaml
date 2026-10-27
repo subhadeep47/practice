@@ -51,14 +51,35 @@ service:
 # Ingress needs a controller (e.g. AWS Load Balancer Controller) installed in the cluster.
 ingress:
   enabled: false
-  className: ""
-  annotations: {}
+  # "alb" is the IngressClass created by the AWS Load Balancer Controller.
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    # ip mode sends traffic straight to pod IPs (works with the ClusterIP Service).
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health/readiness
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+    # HTTPS (needs an ACM certificate in the same region as the ALB):
+    #   alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    #   alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:...
+    #   alb.ingress.kubernetes.io/ssl-redirect: "443"
   hosts:
-    - host: chart-example.local
+    # Leave host empty to serve on the ALB's own DNS name; set a domain once you have one.
+    - host: ""
       paths:
-        - path: /
-          pathType: ImplementationSpecific
+        # Only the API is exposed. /actuator is NOT routed through the load balancer.
+        - path: /api
+          pathType: Prefix
   tls: []
+
+# Keeps at least minAvailable pods up during node drains and upgrades.
+# Leave disabled with a single replica, otherwise node drains block.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
 
 # Gateway API HTTPRoute (requires a Gateway controller).
 httpRoute:

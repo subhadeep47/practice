@@ -1,12 +1,21 @@
-# Overrides for the dev environment. Fill the two TODOs from the Terraform outputs of the rds stack.
+# Overrides for the dev environment.
+# database.host is passed at install time (--set database.host=...), see the README runbook.
 replicaCount: 2
 
 springProfile: dev
 
 database:
-  host: "" # TODO: terraform output db_endpoint (rds stack)
   name: appdb
+  # Secret holding the DB credentials (README step 3: created by hand, or step 3b: synced
+  # by External Secrets Operator with --set externalSecret.enabled=true).
+  existingSecret: backend-db
 
 externalSecret:
+  enabled: false
+
+ingress:
   enabled: true
-  remoteSecretId: "" # TODO: terraform output db_master_secret_arn (rds stack)
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

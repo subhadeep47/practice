@@ -9,6 +9,7 @@ source lives elsewhere in the repo; this folder only holds infrastructure and de
 ansible/      Playbooks + terraform_runner role that drive Terraform
 terraform/    One stack per folder: vpc, eks, rds, s3-cloudfront
 helm/         spring-boot-backend chart
+k8s/          Cluster manifests applied by hand (External Secrets store)
 ```
 
 ## Terraform state and wiring
@@ -61,17 +62,189 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.pas
 - Probes use Spring Boot Actuator (`/actuator/health/liveness` and `/readiness`), so the
   app needs `spring-boot-starter-actuator`.
 - The container runs as non-root with a read-only root filesystem (`/tmp` is an emptyDir).
-- DB settings: `database.host` (terraform output `db_endpoint`), and credentials from a
-  Kubernetes Secret with keys `username` and `password`. Either point
-  `database.existingSecret` at one, or set `externalSecret.enabled=true` and
-  `externalSecret.remoteSecretId` (output `db_master_secret_arn`) to sync the
-  RDS-managed secret via External Secrets Operator. The operator, its IAM role and a
-  `ClusterSecretStore` are not installed by this repo yet.
+- The Service is a `ClusterIP`; the ALB sends traffic straight to pod IPs (`target-type: ip`),
+  so no NodePort is needed.
+- The Ingress (`className: alb`) exposes only `/api`. Actuator is not reachable through the ALB.
+  With an empty `host` it answers on the ALB's own DNS name; set a domain once you have one.
+- DB settings: `database.host` (terraform output `db_endpoint`) and credentials from a
+  Kubernetes Secret with keys `username` and `password` (`database.existingSecret`).
+  An `ExternalSecret` template exists for use once External Secrets Operator is installed.
 - Never deploy with `image.tag: latest`; CI should set an immutable tag (git SHA).
+- HPA is off by default; enabling it needs metrics-server, which EKS does not install.
 
 ```bash
-helm lint helm/spring-boot-backend -f helm/spring-boot-backend/values-dev.yaml
-helm template backend helm/spring-boot-backend -f helm/spring-boot-backend/values-dev.yaml
+helm lint helm/spring-boot-backend -f helm/spring-boot-backend/values-dev.yaml --set database.host=x
+helm template backend helm/spring-boot-backend -f helm/spring-boot-backend/values-dev.yaml --set database.host=x
+```
+
+## Deploying to EKS (dev)
+
+Run from the `devops-project` folder after `ansible-playbook ansible/playbooks/01-provision-infrastructure.yml`.
+Tools: `aws`, `kubectl`, `helm`, `eksctl`, `jq`.
+
+### 1. Connect kubectl
+
+```bash
+export AWS_REGION=us-east-1 CLUSTER=app-cluster-dev
+aws eks update-kubeconfig --name $CLUSTER --region $AWS_REGION
+kubectl get nodes
+```
+
+### 2. AWS Load Balancer Controller (manual, once per cluster)
+
+The controller needs an IAM role. `eksctl create iamserviceaccount` creates the role **and**
+the annotated Kubernetes service account together (IRSA), and the Helm chart then reuses that
+service account (`serviceAccount.create=false`). There is deliberately no ServiceAccount
+manifest for it in this repo: the role ARN is account-specific and `eksctl` owns the account.
+
+```bash
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# OIDC provider for IRSA (the EKS module enables it; this is a safe no-op if it exists)
+eksctl utils associate-iam-oidc-provider --cluster $CLUSTER --region $AWS_REGION --approve
+
+# IAM policy for the controller (v2.14.1; the policy can be reused across clusters)
+curl -o /tmp/lbc_iam_policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.14.1/docs/install/iam_policy.json
+aws iam create-policy --policy-name AWSLoadBalancerControllerIAMPolicy --policy-document file:///tmp/lbc_iam_policy.json
+
+# IAM role + service account in kube-system
+eksctl create iamserviceaccount \
+  --cluster $CLUSTER --region $AWS_REGION \
+  --namespace kube-system --name aws-load-balancer-controller \
+  --attach-policy-arn arn:aws:iam::${ACCOUNT_ID}:policy/AWSLoadBalancerControllerIAMPolicy \
+  --override-existing-serviceaccounts --approve
+
+# Controller (chart 1.14.0 = controller v2.14.1)
+VPC_ID=$(terraform -chdir=terraform/vpc output -raw vpc_id)
+helm repo add eks https://aws.github.io/eks-charts && helm repo update eks
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system --version 1.14.0 \
+  --set clusterName=$CLUSTER --set region=$AWS_REGION --set vpcId=$VPC_ID \
+  --set serviceAccount.create=false --set serviceAccount.name=aws-load-balancer-controller
+
+kubectl -n kube-system rollout status deploy/aws-load-balancer-controller
+```
+
+The VPC stack already tags public subnets with `kubernetes.io/role/elb`, which the controller
+uses to place an internet-facing ALB. AWS lists the Gateway API CRDs as a prerequisite; if the
+controller pods crash on missing `gateway.networking.k8s.io` CRDs, install them first
+(`kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml`).
+
+### 3. Database credentials Secret
+
+RDS generated the master password and keeps it in Secrets Manager. Copy it into the cluster:
+
+```bash
+kubectl create namespace ecommerce
+SECRET_ARN=$(terraform -chdir=terraform/rds output -raw db_master_secret_arn)
+CREDS=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text)
+kubectl -n ecommerce create secret generic backend-db \
+  --from-literal=username="$(echo "$CREDS" | jq -r .username)" \
+  --from-literal=password="$(echo "$CREDS" | jq -r .password)"
+unset CREDS
+```
+
+> RDS-managed master passwords **rotate automatically (every 7 days)**. This hand-made Secret
+> does not follow the rotation, so after a rotation new DB connections fail until you
+> recreate the Secret and restart the pods. Fine for a first test; do step 3b for anything
+> that stays up.
+
+### 3b. External Secrets Operator (keeps the Secret in sync with rotation)
+
+Same pattern as the load balancer controller: `eksctl` creates the IAM role and service
+account (here limited to reading **only** the database secret), Helm reuses it.
+
+```bash
+SECRET_ARN=$(terraform -chdir=terraform/rds output -raw db_master_secret_arn)
+cat > /tmp/eso-policy.json <<EOF
+{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+ "Action":["secretsmanager:GetSecretValue","secretsmanager:DescribeSecret"],
+ "Resource":"${SECRET_ARN}"}]}
+EOF
+aws iam create-policy --policy-name ExternalSecretsDbRead-dev --policy-document file:///tmp/eso-policy.json
+
+kubectl create namespace external-secrets
+eksctl create iamserviceaccount \
+  --cluster $CLUSTER --region $AWS_REGION \
+  --namespace external-secrets --name external-secrets \
+  --attach-policy-arn arn:aws:iam::${ACCOUNT_ID}:policy/ExternalSecretsDbRead-dev \
+  --override-existing-serviceaccounts --approve
+
+helm repo add external-secrets https://charts.external-secrets.io && helm repo update external-secrets
+helm search repo external-secrets/external-secrets      # pick a current version and pin it below
+helm install external-secrets external-secrets/external-secrets -n external-secrets \
+  --version <chart-version> \
+  --set serviceAccount.create=false --set serviceAccount.name=external-secrets
+kubectl -n external-secrets rollout status deploy/external-secrets
+
+# Which API version does this operator serve? The chart defaults to external-secrets.io/v1.
+kubectl get crd externalsecrets.external-secrets.io -o jsonpath='{.spec.versions[*].name}'
+
+# Tell the operator how to reach Secrets Manager (region is set inside the file)
+kubectl apply -f k8s/external-secrets/cluster-secret-store.yaml
+
+# Replace the hand-made Secret: the operator will create backend-db itself
+kubectl -n ecommerce delete secret backend-db --ignore-not-found
+```
+
+Then install the backend (step 4) with these extra flags:
+`--set externalSecret.enabled=true --set externalSecret.remoteSecretId=$SECRET_ARN`
+(add `--set externalSecret.apiVersion=external-secrets.io/v1beta1` only if the CRD check
+above does not list `v1`). The operator refreshes the Secret every hour; pods read the
+password at start-up, so after a rotation run
+`kubectl -n ecommerce rollout restart deploy/backend-spring-boot-backend`.
+
+### 4. Install the backend
+
+```bash
+DB_HOST=$(terraform -chdir=terraform/rds output -raw db_endpoint)
+helm upgrade --install backend helm/spring-boot-backend -n ecommerce \
+  -f helm/spring-boot-backend/values-dev.yaml \
+  --set database.host=$DB_HOST \
+  --set image.repository=<your-registry>/<backend-image> \
+  --set image.tag=<immutable-tag>
+```
+
+If the image is in a **private** Docker Hub (or other registry) repository, create a pull
+secret first and pass `--set 'imagePullSecrets[0].name=regcred'`:
+
+```bash
+kubectl -n ecommerce create secret docker-registry regcred \
+  --docker-username=<user> --docker-password=<access-token>
+```
+
+### 5. Verify
+
+```bash
+kubectl -n ecommerce get pods,svc,ingress
+kubectl -n ecommerce get ingress backend-spring-boot-backend \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'   # ALB DNS name (takes 2-3 min)
+curl -i http://<alb-dns-name>/api/<your-endpoint>
+
+# Actuator is internal only:
+kubectl -n ecommerce port-forward deploy/backend-spring-boot-backend 8080:8080
+curl localhost:8080/actuator/health
+```
+
+Troubleshooting:
+- Ingress has no address: `kubectl -n kube-system logs deploy/aws-load-balancer-controller`
+  (usually IAM/service account or subnet tags).
+- Targets unhealthy in the ALB target group: pod not ready (`kubectl describe pod`) or the
+  health-check path is wrong.
+- Pod crash-looping: `kubectl -n ecommerce logs <pod>`; most often a wrong DB host, a stale
+  password, or missing `spring-boot-starter-actuator`.
+
+### 6. Tear down (order matters)
+
+Delete the ingress **before** `terraform destroy`; otherwise the ALB and its network
+interfaces keep the VPC from being deleted.
+
+```bash
+helm -n ecommerce uninstall backend
+helm -n kube-system uninstall aws-load-balancer-controller
+eksctl delete iamserviceaccount --cluster $CLUSTER --region $AWS_REGION \
+  --namespace kube-system --name aws-load-balancer-controller
+ansible-playbook ansible/playbooks/99-destroy-infrastructure.yml
 ```
 
 ## Frontend (`terraform/s3-cloudfront`)
