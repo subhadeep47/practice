@@ -41,14 +41,3 @@ variable "argocd_server_service_type" {
   description = "Service type for the Argo CD server. ClusterIP = reach via kubectl port-forward; LoadBalancer = public endpoint."
   default     = "ClusterIP"
 }
-
-# Remote state of the vpc stack
-variable "state_bucket" {
-  type        = string
-  description = "S3 bucket holding Terraform remote state"
-}
-
-variable "state_region" {
-  type        = string
-  description = "Region of the Terraform state bucket"
-}

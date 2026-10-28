@@ -1,6 +1,6 @@
 resource "aws_db_subnet_group" "rds_subnet_group" {
   name       = "app-rds-subnet-group-${var.environment}"
-  subnet_ids = data.terraform_remote_state.vpc.outputs.private_subnet_ids
+  subnet_ids = data.aws_subnets.private.ids
 
   tags = {
     Environment = var.environment
@@ -11,7 +11,7 @@ resource "aws_db_subnet_group" "rds_subnet_group" {
 resource "aws_security_group" "rds" {
   name        = "app-rds-sg-${var.environment}"
   description = "Allow PostgreSQL from EKS worker nodes"
-  vpc_id      = data.terraform_remote_state.vpc.outputs.vpc_id
+  vpc_id      = data.aws_vpc.this.id
 
   tags = {
     Name        = "app-rds-sg-${var.environment}"
@@ -21,7 +21,7 @@ resource "aws_security_group" "rds" {
 
 resource "aws_vpc_security_group_ingress_rule" "postgres_from_eks_nodes" {
   security_group_id            = aws_security_group.rds.id
-  referenced_security_group_id = data.terraform_remote_state.eks.outputs.node_security_group_id
+  referenced_security_group_id = data.aws_security_group.eks_nodes.id
   ip_protocol                  = "tcp"
   from_port                    = 5432
   to_port                      = 5432

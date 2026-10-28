@@ -9,10 +9,19 @@ module "eks" {
   cluster_name    = local.cluster_name
   cluster_version = var.cluster_version
 
-  vpc_id     = data.terraform_remote_state.vpc.outputs.vpc_id
-  subnet_ids = data.terraform_remote_state.vpc.outputs.private_subnet_ids
+  vpc_id     = data.aws_vpc.this.id
+  subnet_ids = data.aws_subnets.private.ids
 
   cluster_endpoint_public_access = true
+
+  # LOOKUP CONTRACT: the rds stack finds the worker-node security group through the AWS API
+  # using these two tags (terraform/rds/data.tf). The kubernetes.io/cluster tag is also what
+  # the AWS Load Balancer Controller uses to find the security group it opens to the ALB.
+  node_security_group_tags = {
+    "Role"                                        = "eks-node"
+    "Cluster"                                     = local.cluster_name
+    "kubernetes.io/cluster/${local.cluster_name}" = "owned"
+  }
 
   # Gives the IAM identity running Terraform admin rights on the cluster.
   # Without this the helm provider cannot authenticate to install Argo CD.

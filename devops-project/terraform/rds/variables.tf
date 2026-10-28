@@ -47,14 +47,3 @@ variable "db_username" {
   description = "Database master username"
   default     = "dbadmin"
 }
-
-# Remote state of the vpc and eks stacks
-variable "state_bucket" {
-  type        = string
-  description = "S3 bucket holding Terraform remote state"
-}
-
-variable "state_region" {
-  type        = string
-  description = "Region of the Terraform state bucket"
-}

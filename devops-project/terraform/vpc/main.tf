@@ -19,13 +19,21 @@ module "vpc" {
   enable_dns_hostnames = true
   enable_dns_support   = true
 
-  # Tags the AWS Load Balancer Controller / EKS use to discover subnets.
+  # LOOKUP CONTRACT: the eks and rds stacks find this VPC and its subnets through the AWS
+  # API using these tags (no shared Terraform state). Do not rename them without updating
+  # the data sources in terraform/eks/data.tf and terraform/rds/data.tf.
+  #   VPC:     tag Name = app-vpc-<env>   (set by the module from `name`)
+  #   Subnets: tag Tier = public | private, inside that VPC
+  #
+  # The kubernetes.io tags are what the AWS Load Balancer Controller / EKS use to discover subnets.
   public_subnet_tags = {
+    "Tier"                                        = "public"
     "kubernetes.io/role/elb"                      = 1
     "kubernetes.io/cluster/${local.cluster_name}" = "shared"
   }
 
   private_subnet_tags = {
+    "Tier"                                        = "private"
     "kubernetes.io/role/internal-elb"             = 1
     "kubernetes.io/cluster/${local.cluster_name}" = "shared"
   }

@@ -1,6 +1,8 @@
 ---
 # Provision the full stack, in dependency order:
-#   vpc -> eks (reads vpc state) -> rds (reads vpc + eks state) -> s3-cloudfront
+#   vpc -> eks (looks up the VPC/subnets by tag) -> rds (looks up VPC/subnets/node SG by tag)
+#       -> s3-cloudfront
+# The stacks do not share Terraform state; this order is what guarantees the lookups succeed.
 #
 # Run from the devops-project folder:
 #   ansible-playbook ansible/playbooks/01-provision-infrastructure.yml
