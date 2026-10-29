@@ -1,3 +1,19 @@
 #SPDX-License-Identifier: MIT-0
 ---
-# vars file for terraform_runner
+# vars file for terraform_runner: values derived from the inputs, not meant to be overridden.
+
+# Name of the stack's variable dict in group_vars, e.g. vpc -> tf_vars_vpc,
+# s3-cloudfront -> tf_vars_s3_cloudfront
+tf_stack_vars_name: "tf_vars_{{ tf_service | replace('-', '_') }}"
+
+# Everything Terraform receives for this stack: the values shared by all stacks plus the
+# stack's own values. Written to a temporary JSON var file for the run.
+tf_stack_vars: "{{ tf_vars_common | combine(vars[tf_stack_vars_name]) }}"
+
+# Remote state location, handed to `terraform init`. One state file per environment and stack.
+tf_backend_args:
+  - "-backend-config=bucket={{ tf_backend.bucket }}"
+  - "-backend-config=key={{ tf_backend.key_prefix }}/{{ tf_service }}/terraform.tfstate"
+  - "-backend-config=region={{ tf_backend.region }}"
+  - "-backend-config=encrypt={{ tf_backend.encrypt | default(true) | string | lower }}"
+  - "-backend-config=use_lockfile={{ tf_backend.use_lockfile | default(true) | string | lower }}"

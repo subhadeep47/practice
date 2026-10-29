@@ -1,0 +1,33 @@
+---
+# Print the Terraform outputs of every stack for ONE environment (read-only).
+# It also points each stack folder at this environment's state, so afterwards
+#   terraform -chdir=terraform/<stack> output -raw <name>
+# works for this environment. Run it whenever you switch environments.
+#
+#   ansible-playbook -i ansible/inventories/dev ansible/playbooks/02-show-outputs.yml
+- name: Show Terraform outputs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars/stacks.yml
+
+  vars:
+    tf_action: output
+    tf_services: "{{ tf_stack_order }}"
+
+  pre_tasks:
+    - name: Require an environment inventory
+      ansible.builtin.assert:
+        that: env_name is defined
+        fail_msg: "No environment loaded. Choose one with -i, e.g. -i ansible/inventories/dev"
+        quiet: true
+
+  tasks:
+    - name: Read outputs of each stack
+      ansible.builtin.include_role:
+        name: terraform_runner
+      loop: "{{ tf_services }}"
+      loop_control:
+        loop_var: tf_service

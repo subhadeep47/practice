@@ -3,7 +3,7 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project     = "fullstack-app"
+      Project     = var.project
       Environment = var.environment
     }
   }

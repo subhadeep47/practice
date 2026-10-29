@@ -1,0 +1,6 @@
+---
+# Stack: terraform/s3-cloudfront
+tf_vars_s3_cloudfront:
+  # The environment is appended by Terraform: mycompany-react-frontend-prod.
+  bucket_name_prefix: mycompany-react-frontend
+  price_class: PriceClass_100

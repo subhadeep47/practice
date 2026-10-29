@@ -1,16 +1,20 @@
 #SPDX-License-Identifier: MIT-0
 ---
 # defaults file for terraform_runner
+#
+# Environment values are NOT defaulted here. They come from the environment inventory
+# (ansible/inventories/<env>/group_vars): env_name, tf_backend, tf_vars_common and one
+# tf_vars_<stack> per Terraform stack. See the role README.
 
-# Environment to deploy; selects environments/<target_env>.tfvars and
-# environments/<target_env>.backend.hcl inside each Terraform stack.
-target_env: dev
-
-# plan | apply | destroy
+# plan | apply | destroy | output
 tf_action: apply
 
 # Terraform executable
 tf_bin: terraform
 
-# Folder containing the Terraform stacks (vpc, eks, rds, s3-cloudfront)
+# Folder containing the stacks (vpc, eks, rds, s3-cloudfront)
 tf_root: "{{ playbook_dir }}/../../terraform"
+
+# Extra environment variables for the terraform process, e.g. {AWS_PROFILE: dev-account}.
+# Environments override this in their group_vars.
+tf_process_env: {}

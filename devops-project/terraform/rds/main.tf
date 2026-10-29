@@ -34,7 +34,7 @@ resource "aws_db_instance" "postgresql" {
   engine_version        = var.engine_version
   instance_class        = var.db_instance_class
   allocated_storage     = var.allocated_storage
-  max_allocated_storage = 100
+  max_allocated_storage = var.max_allocated_storage
   storage_encrypted     = true
 
   db_name  = var.db_name
@@ -52,9 +52,9 @@ resource "aws_db_instance" "postgresql" {
   backup_retention_period    = var.backup_retention_period
   auto_minor_version_upgrade = true
 
-  deletion_protection       = var.environment == "dev" ? false : true
-  skip_final_snapshot       = var.environment == "dev" ? true : false
-  final_snapshot_identifier = var.environment == "dev" ? null : "app-postgres-${var.environment}-final"
+  deletion_protection       = var.deletion_protection
+  skip_final_snapshot       = var.skip_final_snapshot
+  final_snapshot_identifier = var.skip_final_snapshot ? null : "app-postgres-${var.environment}-final"
 
   tags = {
     Environment = var.environment

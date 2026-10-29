@@ -1,0 +1,7 @@
+---
+# Stack: terraform/s3-cloudfront
+tf_vars_s3_cloudfront:
+  # S3 bucket names are global: make this unique to you. The environment is appended
+  # by Terraform, e.g. mycompany-react-frontend-dev.
+  bucket_name_prefix: mycompany-react-frontend
+  price_class: PriceClass_100

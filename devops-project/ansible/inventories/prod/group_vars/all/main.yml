@@ -1,0 +1,29 @@
+---
+# ===== Environment: prod ==================================================================
+# STARTING VALUES: sized and hardened sensibly, but never applied. Review every file in this
+# folder (CIDRs, instance sizes, backups, state bucket, AWS account) before the first apply.
+
+env_name: prod
+
+# true = apply/destroy need `-e confirm_env=prod` (a guard against mistakes).
+require_confirmation: true
+
+aws_region: us-east-1
+
+# Production normally lives in its own AWS account: put the profile here, e.g.
+#   AWS_PROFILE: my-prod-profile
+tf_process_env: {}
+
+# Where Terraform keeps its state. Ideally a bucket in the prod account; the key prefix keeps
+# prod state separate from dev even if the bucket is shared. The bucket must already exist.
+tf_backend:
+  bucket: subhadeep-terraform-state-bucket
+  region: eu-north-1
+  key_prefix: devops-project/prod
+  encrypt: true
+  use_lockfile: true
+
+tf_vars_common:
+  environment: "{{ env_name }}"
+  project: fullstack-app
+  aws_region: "{{ aws_region }}"

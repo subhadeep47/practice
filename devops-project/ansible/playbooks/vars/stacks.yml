@@ -1,0 +1,9 @@
+---
+# Terraform stacks in dependency order. This is structure, not environment configuration.
+# The stacks look each other up through the AWS API (tags), so this order is what
+# guarantees the lookups succeed: eks needs the VPC, rds needs the VPC and the EKS nodes.
+tf_stack_order:
+  - vpc            # Networking foundation
+  - eks            # Kubernetes cluster + Argo CD
+  - rds            # PostgreSQL for Spring Boot
+  - s3-cloudfront  # React frontend CDN

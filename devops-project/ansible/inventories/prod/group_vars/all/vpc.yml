@@ -1,0 +1,11 @@
+---
+# Stack: terraform/vpc
+tf_vars_vpc:
+  vpc_cidr: "10.1.0.0/16"   # different from dev so the two can be peered later
+  availability_zones:
+    - "{{ aws_region }}a"
+    - "{{ aws_region }}b"
+    - "{{ aws_region }}c"
+  private_subnet_cidrs: ["10.1.1.0/24", "10.1.2.0/24", "10.1.3.0/24"]      # EKS nodes, RDS
+  public_subnet_cidrs: ["10.1.101.0/24", "10.1.102.0/24", "10.1.103.0/24"] # load balancers, NAT
+  single_nat_gateway: false   # one NAT gateway per public subnet: survives an AZ failure

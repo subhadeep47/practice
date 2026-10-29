@@ -1,44 +1,65 @@
 #SPDX-License-Identifier: MIT-0
 # tasks file for terraform_runner
 #
-# Required variable: tf_service (name of a folder under tf_root)
-# Optional: target_env, tf_action, tf_bin, tf_root (see defaults/main.yml)
+# Runs Terraform for ONE stack, feeding it the values of the loaded environment inventory.
+# Required: tf_service (a folder under tf_root). Optional: tf_action (see defaults/main.yml).
 - name: Validate role inputs
   ansible.builtin.assert:
     that:
       - tf_service is defined
-      - tf_action in ['plan', 'apply', 'destroy']
-    fail_msg: "tf_service must be set and tf_action must be one of plan, apply, destroy"
+      - tf_action in ['plan', 'apply', 'destroy', 'output']
+      - env_name is defined
+      - tf_backend is defined
+      - tf_vars_common is defined
+      - tf_stack_vars_name in vars
+    fail_msg: >-
+      Missing input. tf_service must be set, tf_action must be one of plan/apply/destroy/output,
+      and the environment inventory must define env_name, tf_backend, tf_vars_common and
+      {{ tf_stack_vars_name | default('tf_vars_<stack>') }}. Run with an environment inventory,
+      e.g. -i ansible/inventories/dev
     quiet: true
 
-- name: "Run Terraform {{ tf_action }} for service -> {{ tf_service }}"
+- name: "Terraform {{ tf_action }}: {{ tf_service }} ({{ env_name }})"
+  environment: "{{ {'TF_IN_AUTOMATION': '1'} | combine(tf_process_env) }}"
   vars:
     tf_dir: "{{ tf_root }}/{{ tf_service }}"
     tf_action_args: >-
-      {{ ['-input=false']
-         + ([] if tf_action == 'plan' else ['-auto-approve'])
-         + ['-var-file=environments/' ~ target_env ~ '.tfvars'] }}
-  environment:
-    TF_IN_AUTOMATION: "1"
+      {{ [] if tf_action == 'output'
+         else ['-input=false']
+              + ([] if tf_action == 'plan' else ['-auto-approve'])
+              + ['-var-file=' ~ tf_varfile.path] }}
   block:
-    - name: "Initialize Terraform in {{ tf_service }} (remote backend)"
+    - name: Create a temporary variable file
+      ansible.builtin.tempfile:
+        state: file
+        prefix: "tfvars-{{ env_name }}-{{ tf_service }}-"
+        suffix: .json
+      register: tf_varfile
+      when: tf_action != 'output'
+      changed_when: false
+
+    - name: Write the environment values for this stack
+      ansible.builtin.copy:
+        dest: "{{ tf_varfile.path }}"
+        content: "{{ tf_stack_vars | to_nice_json }}"
+        mode: "0600"
+      when: tf_action != 'output'
+      changed_when: false
+      no_log: true  # keeps values out of the log, in case a secret is added later
+
+    - name: "Initialize Terraform in {{ tf_service }} (state of environment {{ env_name }})"
       ansible.builtin.command:
-        argv:
-          - "{{ tf_bin }}"
-          - init
-          - -input=false
-          - -reconfigure
-          - "-backend-config=environments/{{ target_env }}.backend.hcl"
+        argv: "{{ [tf_bin, 'init', '-input=false', '-reconfigure'] + tf_backend_args }}"
         chdir: "{{ tf_dir }}"
       changed_when: false
 
-    - name: "Terraform {{ tf_action }} in {{ tf_service }} for environment {{ target_env }}"
+    - name: "Terraform {{ tf_action }} in {{ tf_service }} for environment {{ env_name }}"
       ansible.builtin.command:
         argv: "{{ [tf_bin, tf_action] + tf_action_args }}"
         chdir: "{{ tf_dir }}"
       register: tf_result
       changed_when:
-        - tf_action != 'plan'
+        - tf_action in ['apply', 'destroy']
         - "'0 added, 0 changed, 0 destroyed' not in tf_result.stdout"
         - "'Resources: 0 destroyed' not in tf_result.stdout"
 
@@ -50,5 +71,13 @@
     - name: "Fail with Terraform error details"
       ansible.builtin.fail:
         msg: >-
-          Terraform {{ tf_action }} failed for service '{{ tf_service }}'.
+          Terraform {{ tf_action }} failed for stack '{{ tf_service }}' in environment '{{ env_name }}'.
           {{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('')) }}
+
+  always:
+    - name: Remove the temporary variable file
+      ansible.builtin.file:
+        path: "{{ tf_varfile.path }}"
+        state: absent
+      when: tf_varfile.path is defined
+      changed_when: false

@@ -12,7 +12,7 @@ module "eks" {
   vpc_id     = data.aws_vpc.this.id
   subnet_ids = data.aws_subnets.private.ids
 
-  cluster_endpoint_public_access = true
+  cluster_endpoint_public_access = var.cluster_endpoint_public_access
 
   # LOOKUP CONTRACT: the rds stack finds the worker-node security group through the AWS API
   # using these two tags (terraform/rds/data.tf). The kubernetes.io/cluster tag is also what

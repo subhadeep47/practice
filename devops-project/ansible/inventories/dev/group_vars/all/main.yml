@@ -1,0 +1,31 @@
+---
+# ===== Environment: dev ===================================================================
+# Every environment-specific value of this environment lives in this folder (main.yml, vpc.yml,
+# eks.yml, rds.yml, s3_cloudfront.yml). The Terraform code has none.
+
+env_name: dev
+
+# true = apply/destroy need `-e confirm_env=<env_name>` (a guard against mistakes).
+require_confirmation: false
+
+# Region of this environment's resources (re-used by the stack values below).
+aws_region: us-east-1
+
+# Extra environment variables for terraform / the aws CLI. Use this when the environment
+# lives in its own AWS account, e.g.  AWS_PROFILE: my-dev-profile
+tf_process_env: {}
+
+# Where Terraform keeps its state. The bucket must already exist (see README).
+# State key = <key_prefix>/<stack>/terraform.tfstate, so environments never share state.
+tf_backend:
+  bucket: subhadeep-terraform-state-bucket
+  region: eu-north-1
+  key_prefix: devops-project/dev
+  encrypt: true
+  use_lockfile: true
+
+# Values every stack receives.
+tf_vars_common:
+  environment: "{{ env_name }}"
+  project: fullstack-app
+  aws_region: "{{ aws_region }}"

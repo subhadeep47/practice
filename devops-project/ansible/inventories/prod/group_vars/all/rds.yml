@@ -1,0 +1,13 @@
+---
+# Stack: terraform/rds
+tf_vars_rds:
+  db_instance_class: db.t3.medium
+  allocated_storage: 50
+  max_allocated_storage: 200
+  engine_version: "16"
+  multi_az: true
+  backup_retention_period: 14
+  skip_final_snapshot: false    # a final snapshot is taken on destroy
+  deletion_protection: true     # switch off (and apply) before the database can be destroyed
+  db_name: appdb
+  db_username: dbadmin

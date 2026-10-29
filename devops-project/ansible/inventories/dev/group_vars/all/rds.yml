@@ -1,0 +1,13 @@
+---
+# Stack: terraform/rds
+tf_vars_rds:
+  db_instance_class: db.t3.micro
+  allocated_storage: 20
+  max_allocated_storage: 100
+  engine_version: "16"
+  multi_az: false
+  backup_retention_period: 1
+  skip_final_snapshot: true     # throwaway environment: no snapshot on destroy
+  deletion_protection: false
+  db_name: appdb
+  db_username: dbadmin

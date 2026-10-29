@@ -1,31 +1,44 @@
 ---
-# Tear the stack down in reverse dependency order.
-# Run from the devops-project folder:
-#   ansible-playbook ansible/playbooks/99-destroy-infrastructure.yml
+# Tear ONE environment down, in reverse dependency order.
+# Run from the devops-project folder (read the README "Tear down" section first):
+#   ansible-playbook -i ansible/inventories/dev ansible/playbooks/99-destroy-infrastructure.yml
+# Protected settings still apply: prod has RDS deletion_protection, which must be switched
+# off (and applied) before the database can be destroyed.
+
+# Play 1 runs before the confirmation prompt so a missing inventory fails immediately.
+- name: Check the environment
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require an environment inventory
+      ansible.builtin.assert:
+        that: env_name is defined
+        fail_msg: "No environment loaded. Choose one with -i, e.g. -i ansible/inventories/dev"
+        quiet: true
+
 - name: Destroy Full-Stack Infrastructure via Terraform
   hosts: localhost
   connection: local
   gather_facts: false
 
+  vars_files:
+    - vars/stacks.yml
+
   vars:
-    target_env: dev
     tf_action: destroy
-    tf_services:
-      - s3-cloudfront
-      - rds
-      - eks
-      - vpc
+    tf_services: "{{ tf_stack_order | reverse | list }}"
 
   vars_prompt:
     - name: destroy_confirmation
-      prompt: "This destroys ALL infrastructure. Type the environment name to confirm"
+      prompt: "This destroys ALL infrastructure of the loaded environment. Type its name to confirm"
       private: false
 
   pre_tasks:
     - name: Confirm destroy
       ansible.builtin.assert:
-        that: destroy_confirmation == target_env
-        fail_msg: "Confirmation did not match environment '{{ target_env }}'. Aborting."
+        that: destroy_confirmation == env_name
+        fail_msg: "Confirmation did not match environment '{{ env_name }}'. Aborting."
         quiet: true
 
   tasks:

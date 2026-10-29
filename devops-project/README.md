@@ -4,8 +4,10 @@ DevOps setup for an e-commerce application: React (TypeScript) frontend, Spring 
 backend, PostgreSQL on AWS RDS. Application source code lives elsewhere in the repo; this
 folder only holds infrastructure and delivery.
 
-- **Terraform** builds the AWS infrastructure (VPC, EKS, RDS, S3 + CloudFront).
-- **Ansible** runs the Terraform stacks in the right order.
+- **Terraform** builds the AWS infrastructure (VPC, EKS, RDS, S3 + CloudFront). It describes
+  structure only: it contains no environment-specific values.
+- **Ansible** owns every environment-specific value (one folder per environment: `dev`,
+  `prod`), passes them to Terraform and runs the stacks in the right order.
 - **Helm** packages the Spring Boot backend for Kubernetes.
 - **Argo CD** deploys the chart to EKS from git (GitOps).
 - **Not built yet:** GitHub Actions CI, Prometheus/Grafana monitoring (see [What's next](#whats-next)).
@@ -14,18 +16,19 @@ folder only holds infrastructure and delivery.
 
 1. [Architecture](#architecture)
 2. [Repository layout](#repository-layout)
-3. [Prerequisites](#prerequisites)
-4. [Step 1 - Provision the infrastructure](#step-1---provision-the-infrastructure)
-5. [Step 2 - Connect to the cluster](#step-2---connect-to-the-cluster)
-6. [Step 3 - AWS Load Balancer Controller](#step-3---aws-load-balancer-controller)
-7. [Step 4 - Database credentials](#step-4---database-credentials)
-8. [Step 5 - Bootstrap Argo CD and deploy the backend](#step-5---bootstrap-argo-cd-and-deploy-the-backend)
-9. [Step 6 - Deploy the frontend](#step-6---deploy-the-frontend)
-10. [Day-2 operations](#day-2-operations)
-11. [Tear down](#tear-down)
-12. [Troubleshooting](#troubleshooting)
-13. [Design decisions](#design-decisions)
-14. [What's next](#whats-next)
+3. [Environments and configuration](#environments-and-configuration)
+4. [Prerequisites](#prerequisites)
+5. [Step 1 - Provision the infrastructure](#step-1---provision-the-infrastructure)
+6. [Step 2 - Connect to the cluster](#step-2---connect-to-the-cluster)
+7. [Step 3 - AWS Load Balancer Controller](#step-3---aws-load-balancer-controller)
+8. [Step 4 - Database credentials](#step-4---database-credentials)
+9. [Step 5 - Bootstrap Argo CD and deploy the backend](#step-5---bootstrap-argo-cd-and-deploy-the-backend)
+10. [Step 6 - Deploy the frontend](#step-6---deploy-the-frontend)
+11. [Day-2 operations](#day-2-operations)
+12. [Tear down](#tear-down)
+13. [Troubleshooting](#troubleshooting)
+14. [Design decisions](#design-decisions)
+15. [What's next](#whats-next)
 
 ## Architecture
 
@@ -55,22 +58,75 @@ Delivery flow: you push to `main` -> Argo CD notices (within about 3 minutes) ->
 devops-project/
 ├── ansible.cfg
 ├── ansible/
+│   ├── inventories/
+│   │   ├── dev/             ALL values of the dev environment
+│   │   │   ├── hosts.yml
+│   │   │   └── group_vars/all/   main.yml (env, region, state), vpc.yml, eks.yml,
+│   │   │                         rds.yml, s3_cloudfront.yml
+│   │   └── prod/            same files, prod values
 │   ├── playbooks/
 │   │   ├── 01-provision-infrastructure.yml   run Terraform for all stacks, in order
-│   │   └── 99-destroy-infrastructure.yml     destroy all stacks, reverse order
-│   └── roles/terraform_runner/               init (S3 backend) + plan/apply/destroy for one stack
-├── terraform/
+│   │   ├── 02-show-outputs.yml               print the outputs of all stacks
+│   │   ├── 99-destroy-infrastructure.yml     destroy all stacks, reverse order
+│   │   └── vars/stacks.yml                   stack order (structure, not configuration)
+│   └── roles/terraform_runner/               values -> var file, init (S3 backend), plan/apply/destroy
+├── terraform/           structure only: variables have no defaults, there are no tfvars
 │   ├── vpc/             VPC, subnets, NAT                    (apply 1st)
 │   ├── eks/             EKS cluster + Argo CD (Helm)         (apply 2nd)
 │   ├── rds/             PostgreSQL + security group          (apply 3rd)
 │   └── s3-cloudfront/   React hosting                        (independent)
-│        each stack: environments/<env>.tfvars and environments/<env>.backend.hcl
 ├── helm/spring-boot-backend/   chart; values-dev.yaml = desired state of dev
 ├── argocd/
 │   ├── root-app.yaml           applied by hand once; points Argo CD at argocd/apps
 │   └── apps/                   AppProject + Application manifests (managed by Argo CD)
 └── k8s/external-secrets/       ClusterSecretStore applied by hand (step 4A)
 ```
+
+## Environments and configuration
+
+**Rule: Terraform has no environment-specific content; Ansible has all of it.**
+
+- An environment is an Ansible inventory folder: `ansible/inventories/dev`,
+  `ansible/inventories/prod`. You choose it with `-i`, and there is deliberately no default,
+  so a forgotten flag can never touch the wrong environment.
+- Everything that differs between environments is in that folder's `group_vars/all/`:
+
+  | File | Contents |
+  |---|---|
+  | `main.yml` | `env_name`, region, the S3 state location (`tf_backend`), values shared by all stacks (`tf_vars_common`: environment, project, region), `require_confirmation`, optional `tf_process_env` (e.g. `AWS_PROFILE` for a separate AWS account) |
+  | `vpc.yml` | `tf_vars_vpc`: CIDRs, availability zones, single or per-AZ NAT |
+  | `eks.yml` | `tf_vars_eks`: Kubernetes version, node types and counts, API endpoint access, Argo CD chart version |
+  | `rds.yml` | `tf_vars_rds`: instance class, storage, engine version, multi-AZ, backups, snapshot and deletion protection, DB name and user |
+  | `s3_cloudfront.yml` | `tf_vars_s3_cloudfront`: bucket name prefix, price class |
+
+- On every run the `terraform_runner` role merges `tf_vars_common` with the stack's own
+  dictionary, writes the result to a temporary JSON var file (mode 0600, deleted afterwards)
+  and runs `terraform plan/apply/destroy -var-file=<that file>`. It also runs
+  `terraform init -reconfigure` with `-backend-config` flags built from `tf_backend`, so every
+  environment and stack has its own state file
+  (`<key_prefix>/<stack>/terraform.tfstate`, e.g. `devops-project/dev/vpc/terraform.tfstate`).
+- Every Terraform variable is **required and has no default**. If Ansible does not supply one,
+  Terraform stops with "No value for required variable" instead of silently guessing.
+- The `dev` values are exactly what the earlier `dev.tfvars` files and variable defaults
+  contained. The `prod` values are sensible starting points that have never been applied
+  (separate CIDR, three AZs, one NAT per AZ, multi-AZ RDS with deletion protection, bigger
+  nodes): review them before the first prod apply.
+- `prod` sets `require_confirmation: true`: anything other than `plan`/`output` needs
+  `-e confirm_env=prod`, so a prod apply is always a deliberate, second step.
+- What is **not** in Ansible: the Kubernetes side. Argo CD deploys from git, so per-environment
+  chart values stay in git next to the chart (`helm/spring-boot-backend/values-<env>.yaml`)
+  and the Argo CD applications in `argocd/apps/`.
+
+**Add an environment** (for example `staging`): copy `ansible/inventories/dev` to
+`ansible/inventories/staging`, change `env_name`, `key_prefix` and the values, then run the
+playbooks with `-i ansible/inventories/staging`. No Terraform change is needed.
+
+**Change a value:** edit the file in the environment's folder, run the playbook with
+`-e tf_action=plan`, review, then apply.
+
+**Secrets** do not belong in these plain files. There are none today (RDS generates the
+database password). If one is ever needed, put it in an `ansible-vault` encrypted file in the
+same `group_vars/all/` folder; the role writes the var file without logging its content.
 
 ## Prerequisites
 
@@ -92,8 +148,8 @@ Consider turning on versioning for the bucket.
 
 | What | Where |
 |---|---|
-| Globally unique frontend bucket name | `terraform/s3-cloudfront/environments/dev.tfvars` (`bucket_name_prefix`) |
-| Region, sizes, CIDRs | the `environments/dev.tfvars` of each stack |
+| Globally unique frontend bucket name | `ansible/inventories/<env>/group_vars/all/s3_cloudfront.yml` (`bucket_name_prefix`) |
+| State bucket, region, sizes, CIDRs, anything else per environment | the other files in `ansible/inventories/<env>/group_vars/all/` |
 | Backend image, DB host, secret settings | `helm/spring-boot-backend/values-dev.yaml` (step 5) |
 
 Everything below is run from the `devops-project` folder.
@@ -102,13 +158,18 @@ Everything below is run from the `devops-project` folder.
 
 ```bash
 # preview, then create (about 20 minutes, mostly EKS and RDS)
-ansible-playbook ansible/playbooks/01-provision-infrastructure.yml -e tf_action=plan
-ansible-playbook ansible/playbooks/01-provision-infrastructure.yml
+ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml -e tf_action=plan
+ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml
+
+# prod: the same, but applying needs the explicit confirmation flag
+ansible-playbook -i ansible/inventories/prod ansible/playbooks/01-provision-infrastructure.yml -e tf_action=plan
+ansible-playbook -i ansible/inventories/prod ansible/playbooks/01-provision-infrastructure.yml -e confirm_env=prod
 ```
 
 The playbook applies `vpc`, then `eks`, then `rds`, then `s3-cloudfront`. `plan` for `eks`
 and `rds` only works after the stacks before them exist (see [Design decisions](#design-decisions)).
-Add `-e target_env=<env>` for another environment once it has its own tfvars and backend files.
+The rest of this guide shows `dev`; for another environment change the `-i` path (and the
+`ENV` variable in step 2).
 
 This creates a VPC with public and private subnets, an EKS cluster (Kubernetes 1.35,
 managed node group, **Argo CD installed by Helm**), an encrypted RDS PostgreSQL 16 instance
@@ -116,30 +177,45 @@ whose password RDS generates and keeps in Secrets Manager, and the S3 + CloudFro
 These resources cost money while they exist, notably the EKS control plane, the NAT
 gateway, the nodes and RDS. [Tear down](#tear-down) when you are not using them.
 
-Useful outputs (run a stack's outputs with `terraform -chdir=terraform/<stack> output`):
-`vpc_id`, `db_endpoint`, `db_master_secret_arn`, `cluster_name`, `s3_bucket_name`,
-`cloudfront_domain_name`, `cloudfront_distribution_id`.
-
-To run a single stack by hand:
+**Outputs.** Print them for the environment with
 
 ```bash
-cd terraform/vpc
-terraform init -backend-config=environments/dev.backend.hcl
-terraform apply -var-file=environments/dev.tfvars
+ansible-playbook -i ansible/inventories/dev ansible/playbooks/02-show-outputs.yml
 ```
+
+Useful ones: `vpc_id`, `db_endpoint`, `db_master_secret_arn`, `cluster_name`,
+`s3_bucket_name`, `cloudfront_domain_name`, `cloudfront_distribution_id`. Running this
+playbook also points every stack folder at that environment's state, so afterwards the
+`terraform -chdir=terraform/<stack> output -raw <name>` commands used later in this guide
+return that environment's values. **Run it again whenever you switch environment**, otherwise
+those commands read whichever environment was used last.
+
+**One stack only** (for example while changing the VPC):
+
+```bash
+ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml \
+  -e tf_action=plan -e '{"tf_services": ["vpc"]}'
+```
+
+Do not run `terraform apply` by hand in a stack folder: it has no variable values (they come
+from Ansible), which is the point.
 
 ## Step 2 - Connect to the cluster
 
 ```bash
-export AWS_REGION=us-east-1 CLUSTER=app-cluster-dev
+export ENV=dev                                   # the environment you provisioned
+export AWS_REGION=us-east-1                      # aws_region in ansible/inventories/$ENV/group_vars/all/main.yml
+export CLUSTER=app-cluster-$ENV                  # cluster name = app-cluster-<env_name>
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
 aws eks update-kubeconfig --name $CLUSTER --region $AWS_REGION
-kubectl get nodes                  # 2 nodes in Ready state
+kubectl get nodes                  # nodes in Ready state (dev: 2)
 kubectl -n argocd get pods         # Argo CD pods Running
 ```
 
-Keep these variables in your shell for the next steps.
+Keep these variables in your shell for the next steps. If you set `AWS_PROFILE` in the
+environment's `tf_process_env`, export the same profile in your shell for `aws`, `eksctl` and
+`kubectl`.
 
 ## Step 3 - AWS Load Balancer Controller
 
@@ -202,13 +278,13 @@ cat > /tmp/eso-policy.json <<EOF
  "Action":["secretsmanager:GetSecretValue","secretsmanager:DescribeSecret"],
  "Resource":"${SECRET_ARN}"}]}
 EOF
-aws iam create-policy --policy-name ExternalSecretsDbRead-dev --policy-document file:///tmp/eso-policy.json
+aws iam create-policy --policy-name ExternalSecretsDbRead-${ENV} --policy-document file:///tmp/eso-policy.json
 
 kubectl create namespace external-secrets
 eksctl create iamserviceaccount \
   --cluster $CLUSTER --region $AWS_REGION \
   --namespace external-secrets --name external-secrets \
-  --attach-policy-arn arn:aws:iam::${ACCOUNT_ID}:policy/ExternalSecretsDbRead-dev \
+  --attach-policy-arn arn:aws:iam::${ACCOUNT_ID}:policy/ExternalSecretsDbRead-${ENV} \
   --override-existing-serviceaccounts --approve
 
 helm repo add external-secrets https://charts.external-secrets.io && helm repo update external-secrets
@@ -248,7 +324,8 @@ the pods. To switch to option A later, delete it first: `kubectl -n ecommerce de
 ## Step 5 - Bootstrap Argo CD and deploy the backend
 
 Argo CD was installed by Terraform (chart `argo-cd` 10.8.3; a newer 10.11.x exists and can be
-adopted by changing `argocd_chart_version` in `terraform/eks`). Its UI is not exposed publicly.
+adopted by changing `argocd_chart_version` in `ansible/inventories/<env>/group_vars/all/eks.yml`).
+Its UI is not exposed publicly.
 The repository is public, so Argo CD needs no git credentials.
 
 ### 5.1 Open the Argo CD UI
@@ -358,13 +435,15 @@ edits. For a temporary manual change, pause auto-sync on `backend-dev` in the UI
 to a new file and change the name, values file and namespace (and add the namespace to the
 `ecommerce` project's `destinations`). Argo CD picks it up from `argocd/apps/`.
 
-**Change infrastructure.** Edit the Terraform, then `ansible-playbook ... -e tf_action=plan`
-and apply. Each stack can also be run on its own (see step 1).
+**Change infrastructure.** For a value (size, CIDR, version, backup days, ...) edit the
+environment's file in `ansible/inventories/<env>/group_vars/all/`; for structure edit the
+Terraform. Then run `01-provision-infrastructure.yml` with `-e tf_action=plan`, review, and
+apply. Each stack can also be run on its own (see step 1). Try changes in `dev` first.
 
-**Upgrade versions.** Kubernetes: `cluster_version` in `terraform/eks/environments/dev.tfvars`
-(1.34 leaves standard support on 2 Dec 2026). Argo CD: `argocd_chart_version`. Load balancer
-controller and External Secrets: `helm upgrade` with the new chart version (CRDs are not
-upgraded by Helm; see each project's release notes).
+**Upgrade versions.** Kubernetes: `cluster_version` in the environment's `eks.yml` (1.34
+leaves standard support on 2 Dec 2026). Argo CD: `argocd_chart_version` in the same file.
+Load balancer controller and External Secrets: `helm upgrade` with the new chart version
+(CRDs are not upgraded by Helm; see each project's release notes).
 
 ## Tear down
 
@@ -387,18 +466,27 @@ eksctl delete iamserviceaccount --cluster $CLUSTER --region $AWS_REGION \
   --namespace external-secrets --name external-secrets
 
 # 3. Destroy the infrastructure (asks you to type the environment name)
-ansible-playbook ansible/playbooks/99-destroy-infrastructure.yml
+ansible-playbook -i ansible/inventories/$ENV ansible/playbooks/99-destroy-infrastructure.yml
 ```
 
 The IAM policies you created by hand (`AWSLoadBalancerControllerIAMPolicy`,
-`ExternalSecretsDbRead-dev`) stay until you delete them with `aws iam delete-policy`.
-In `dev` the database is deleted without a final snapshot.
+`ExternalSecretsDbRead-<env>`) stay until you delete them with `aws iam delete-policy`.
+What happens to the database is set per environment: `dev` has no final snapshot and no
+deletion protection, so it is deleted at once; `prod` takes a final snapshot and has deletion
+protection, so first set `deletion_protection: false` in `prod`'s `rds.yml`, apply, and only
+then destroy.
 
 ## Troubleshooting
 
 | Symptom | Likely cause and fix |
 |---|---|
 | `plan` of `eks`/`rds` fails with "no matching VPC" or "expected at least 2 private subnets" | The `vpc` (or `eks`) stack has not been applied yet; apply in order. |
+| Playbook stops with "No environment loaded" or "Missing input ... env_name" | You forgot `-i ansible/inventories/<env>`. |
+| Playbook stops with "Environment 'prod' is protected" | Review a `plan`, then re-run with `-e confirm_env=prod`. |
+| Terraform says "No value for required variable X" | The variable is declared in `terraform/<stack>/variables.tf` but missing from the environment's `tf_vars_<stack>` (or `tf_vars_common`) in `ansible/inventories/<env>/group_vars/all/`. |
+| Terraform warns "Value for undeclared variable" | A key in the environment's variables has no matching `variable` block in that stack; remove it or declare it. |
+| `terraform output` in a stack folder shows another environment's values | The folder is initialised for the environment used last. Run `02-show-outputs.yml` with the right `-i`. |
+| `tf_action=plan` for `prod` complains about the state bucket | The bucket in `tf_backend` does not exist or your AWS identity cannot reach it. |
 | `kubectl` says unauthorized | You are using a different AWS identity than the one that created the cluster. Check `aws sts get-caller-identity`. |
 | `backend-dev` shows *ComparisonError* "database.host is required" | `values-dev.yaml` still has an empty `database.host`, or the change is not pushed. |
 | `backend-dev` shows "resource ... is not permitted in project ecommerce" | A new kind was added to the chart. Add it to `namespaceResourceWhitelist` in `argocd/apps/project-ecommerce.yaml`. |
@@ -413,6 +501,14 @@ In `dev` the database is deleted without a final snapshot.
 
 ## Design decisions
 
+- **Terraform is structure, Ansible is configuration.** One place per environment
+  (`ansible/inventories/<env>/group_vars/all/`) answers "what is different in prod?", and the
+  Terraform code is identical for every environment. Terraform variables have no defaults,
+  and environment-name conditionals (`var.environment == "dev" ? ...`) were replaced by
+  explicit variables (`single_nat_gateway`, `skip_final_snapshot`, `deletion_protection`, ...),
+  so nothing about an environment is hidden in the code. The trade-off: you cannot run
+  `terraform apply` by hand in a stack folder without a var file, and Ansible is now required.
+  The `environment` variable that Terraform still receives is only a label for names and tags.
 - **No cross-stack remote state.** A Terraform state file holds every attribute of every
   resource in the stack, so letting one pipeline read another stack's state would widen its
   access well beyond the few IDs it needs. Stacks look each other up through the AWS API
@@ -431,7 +527,7 @@ In `dev` the database is deleted without a final snapshot.
   Secrets Operator need account-specific IAM roles, so they are a one-time manual step.
   Everything application-related is deployed by Argo CD from git.
 - **Argo CD itself is managed by Terraform**, which avoids Argo CD managing its own
-  installation. Upgrade it through `argocd_chart_version`.
+  installation. Upgrade it through `argocd_chart_version` in the environment's `eks.yml`.
 - **Backend is public over HTTP for now.** The ALB serves plain HTTP on its own DNS name.
 
 ## What's next
@@ -443,4 +539,6 @@ In `dev` the database is deleted without a final snapshot.
    another Argo CD application), with Spring Boot metrics from Actuator.
 3. **HTTPS and a domain:** a Route 53 record and an ACM certificate for the ALB (annotations
    are prepared in `values.yaml`), CORS for the frontend origin.
-4. **More environments:** staging/prod tfvars, backend files, values files and Argo CD apps.
+4. **Prod:** review the starting values in `ansible/inventories/prod`, give it its own AWS
+   account/profile and state bucket, then add `values-prod.yaml` and a `backend-prod`
+   Argo CD application (see Day-2 operations).
