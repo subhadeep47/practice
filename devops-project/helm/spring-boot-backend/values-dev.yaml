@@ -1,17 +1,35 @@
-# Overrides for the dev environment.
-# database.host is passed at install time (--set database.host=...), see the README runbook.
+# Environment overrides for dev.
+# Argo CD (argocd/apps/backend-dev.yaml) deploys the chart with this file, so everything in
+# here is the desired state of the cluster: change it in git, never with `helm --set`.
+
 replicaCount: 2
 
 springProfile: dev
 
+# ---- EDIT BEFORE THE FIRST SYNC (see README, "Bootstrap Argo CD") -----------------------
+
+image:
+  # Your backend image, e.g. docker.io/<user>/<repo>.
+  repository: your-dockerhub-username/spring-boot-backend
+  # Immutable tag (git SHA). Empty falls back to the chart appVersion, which is rarely what
+  # you want. CI will update this line on every build.
+  tag: ""
+
 database:
+  # terraform -chdir=terraform/rds output -raw db_endpoint
+  host: ""
   name: appdb
-  # Secret holding the DB credentials (README step 3: created by hand, or step 3b: synced
-  # by External Secrets Operator with --set externalSecret.enabled=true).
+  # Secret with keys username/password. Created by hand (README step 4B) or by the
+  # ExternalSecret below (step 4A).
   existingSecret: backend-db
 
 externalSecret:
+  # true after External Secrets Operator is installed (README step 4A).
   enabled: false
+  # terraform -chdir=terraform/rds output -raw db_master_secret_arn (an ARN, not a secret)
+  remoteSecretId: ""
+
+# -----------------------------------------------------------------------------------------
 
 ingress:
   enabled: true

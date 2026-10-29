@@ -1,0 +1,32 @@
+# App-of-apps entry point. Apply this ONE file by hand, once per cluster:
+#   kubectl apply -f argocd/root-app.yaml
+# From then on Argo CD watches argocd/apps/ in git and creates/updates/removes everything
+# declared there (the AppProject and the applications). To add an app, add a file there.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    # Deleting this Application also deletes the child Applications (and, through their own
+    # finalizers, the workloads they deployed). This is what makes teardown a single command.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/subhadeep47/practice.git
+    targetRevision: main
+    path: devops-project/argocd/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

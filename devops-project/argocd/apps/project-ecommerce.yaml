@@ -1,0 +1,45 @@
+# Argo CD project: limits what the e-commerce applications may deploy, and where from.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: ecommerce
+  namespace: argocd
+  annotations:
+    # Create the project before the Applications that reference it.
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  description: E-commerce application workloads
+
+  # Only this repository may be deployed from.
+  sourceRepos:
+    - https://github.com/subhadeep47/practice.git
+
+  # Only the ecommerce namespace on this cluster.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: ecommerce
+
+  # Cluster-scoped kinds allowed: just Namespace (needed by the CreateNamespace sync option).
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+  # Namespaced kinds the backend chart may create. If you add a new kind to the chart,
+  # add it here too, otherwise the sync fails with "resource ... is not permitted in project".
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: ServiceAccount
+    - group: ""
+      kind: Service
+    - group: apps
+      kind: Deployment
+    - group: networking.k8s.io
+      kind: Ingress
+    - group: policy
+      kind: PodDisruptionBudget
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+    - group: external-secrets.io
+      kind: ExternalSecret
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute

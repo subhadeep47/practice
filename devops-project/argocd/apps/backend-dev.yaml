@@ -1,0 +1,46 @@
+# Spring Boot backend, dev environment.
+# Deploys helm/spring-boot-backend with helm/spring-boot-backend/values-dev.yaml.
+# Everything environment-specific (image, DB host, ...) lives in values-dev.yaml in git;
+# there are no `helm --set` flags under GitOps.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: backend-dev
+  namespace: argocd
+  finalizers:
+    # Deleting this Application also deletes what it deployed (including the ALB's Ingress).
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: ecommerce
+  source:
+    repoURL: https://github.com/subhadeep47/practice.git
+    targetRevision: main
+    path: devops-project/helm/spring-boot-backend
+    helm:
+      # Keeps resource names stable: <release>-<chart> = backend-spring-boot-backend.
+      releaseName: backend
+      valueFiles:
+        - values-dev.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: ecommerce
+  syncPolicy:
+    automated:
+      prune: true     # remove resources deleted from git
+      selfHeal: true  # revert manual changes made with kubectl
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      # Covers the first minutes, e.g. while the DB Secret or the load balancer controller
+      # is not ready yet.
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
+  # If you enable autoscaling in values-dev.yaml, let the HPA own the replica count:
+  # ignoreDifferences:
+  #   - group: apps
+  #     kind: Deployment
+  #     jsonPointers:
+  #       - /spec/replicas
