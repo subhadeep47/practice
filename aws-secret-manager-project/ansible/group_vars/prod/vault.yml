@@ -1,0 +1,2 @@
+# NOTE: Run 'ansible-vault encrypt ansible/group_vars/prod/vault.yml' before committing to git
+db_password: "my-prod-highly-secure-plaintext-password"

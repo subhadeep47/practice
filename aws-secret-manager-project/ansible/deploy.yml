@@ -1,0 +1,16 @@
+---
+- name: Deploy Environment Infrastructure via Terraform
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Execute Terraform to create AWS Secret with Environment Context
+      community.general.terraform:
+        project_path: "../terraform/secret-manager"
+        state: present
+        force_init: true
+      environment:
+        # Terraform reads these natively as input variables
+        TF_VAR_aws_region: "{{ aws_region }}"
+        TF_VAR_secret_name: "{{ secret_name }}"
+        TF_VAR_db_password: "{{ db_password }}" # Decrypted seamlessly in-memory
