@@ -1,2 +1,2 @@
 aws_region: "eu-central-1"
-secret_name: "dev-database-password-awx"
+secret_name: "dev-demo-password-awx"
