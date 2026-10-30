@@ -1,2 +1,3 @@
 aws_region: "us-west-2"
 secret_name: "prod-database-password"
+db_password: "{{ actual_password }}"
