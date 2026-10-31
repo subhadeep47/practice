@@ -1,0 +1,66 @@
+#SPDX-License-Identifier: MIT-0
+# Checks that a usable saved plan exists for tf_service. Read-only: changes nothing.
+#
+# Used twice:
+#   - by the provisioning playbook BEFORE any stack is applied, so a missing or stale plan for
+#     a later stack cannot leave the environment half-applied;
+#   - by the role itself right before each apply.
+- name: "Look for a fresh saved plan of {{ tf_service }}"
+  ansible.builtin.find:
+    paths: "{{ tf_plan_dir }}"
+    patterns: "{{ tf_service }}.tfplan"
+    file_type: file
+    age: "-{{ tf_plan_max_age_minutes }}m"
+    age_stamp: mtime
+  register: tf_fresh_plan
+
+- name: "Require a fresh saved plan for {{ tf_service }}"
+  ansible.builtin.assert:
+    that: tf_fresh_plan.matched == 1
+    fail_msg: >-
+      No saved plan for stack '{{ tf_service }}' in environment '{{ env_name }}' that is newer
+      than {{ tf_plan_max_age_minutes }} minutes (looked for {{ tf_plan_file }}). Create one
+      with -e tf_action=plan, review it, then apply.
+    quiet: true
+
+- name: "Look for the metadata of the saved plan of {{ tf_service }}"
+  ansible.builtin.stat:
+    path: "{{ tf_plan_meta_file }}"
+  register: tf_meta_stat
+
+- name: "Require the metadata of the saved plan of {{ tf_service }}"
+  ansible.builtin.assert:
+    that: tf_meta_stat.stat.exists
+    fail_msg: >-
+      The plan for '{{ tf_service }}' has no metadata file ({{ tf_plan_meta_file }}), so it was
+      not made by this role or was damaged. Plan again.
+    quiet: true
+
+- name: "Read the metadata of the saved plan of {{ tf_service }}"
+  ansible.builtin.slurp:
+    src: "{{ tf_plan_meta_file }}"
+  register: tf_plan_meta_raw
+
+- name: Get the current git commit
+  ansible.builtin.command:
+    argv: [git, rev-parse, HEAD]
+    chdir: "{{ tf_root }}"
+  register: tf_git_head
+  changed_when: false
+  failed_when: false  # no git available: the commit check is skipped, not fatal
+
+- name: "Require that the plan of {{ tf_service }} was made from the current commit"
+  vars:
+    tf_plan_meta: "{{ tf_plan_meta_raw.content | b64decode | from_json }}"
+  ansible.builtin.assert:
+    that: >-
+      tf_plan_ignore_commit | bool
+      or tf_commit == ''
+      or (tf_plan_meta.commit | default('')) == ''
+      or tf_plan_meta.commit == tf_commit
+    fail_msg: >-
+      The plan for '{{ tf_service }}' was made at git commit {{ tf_plan_meta.commit | default('?') }}
+      but {{ tf_commit }} is checked out now. Plan again so you apply what you reviewed.
+      (Only if the difference is harmless, for example a README change, re-run with
+      -e tf_plan_ignore_commit=true.)
+    quiet: true

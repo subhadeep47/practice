@@ -93,7 +93,7 @@ devops-project/
 
   | File | Contents |
   |---|---|
-  | `main.yml` | `env_name`, region, the S3 state location (`tf_backend`), values shared by all stacks (`tf_vars_common`: environment, project, region), `require_confirmation`, optional `tf_process_env` (e.g. `AWS_PROFILE` for a separate AWS account) |
+  | `main.yml` | `env_name`, region, the S3 state location (`tf_backend`), values shared by all stacks (`tf_vars_common`: environment, project, region), optional `tf_process_env` (e.g. `AWS_PROFILE` for a separate AWS account) |
   | `vpc.yml` | `tf_vars_vpc`: CIDRs, availability zones, single or per-AZ NAT |
   | `eks.yml` | `tf_vars_eks`: Kubernetes version, node types and counts, API endpoint access, Argo CD chart version |
   | `rds.yml` | `tf_vars_rds`: instance class, storage, engine version, multi-AZ, backups, snapshot and deletion protection, DB name and user |
@@ -101,7 +101,8 @@ devops-project/
 
 - On every run the `terraform_runner` role merges `tf_vars_common` with the stack's own
   dictionary, writes the result to a temporary JSON var file (mode 0600, deleted afterwards)
-  and runs `terraform plan/apply/destroy -var-file=<that file>`. It also runs
+  and runs `terraform plan -out=<saved plan> -var-file=<that file>` (or `destroy`). `apply`
+  takes no variables: it applies the saved plan (see [Plan, then apply](#plan-then-apply)). It also runs
   `terraform init -reconfigure` with `-backend-config` flags built from `tf_backend`, so every
   environment and stack has its own state file
   (`<key_prefix>/<stack>/terraform.tfstate`, e.g. `devops-project/dev/vpc/terraform.tfstate`).
@@ -111,8 +112,8 @@ devops-project/
   contained. The `prod` values are sensible starting points that have never been applied
   (separate CIDR, three AZs, one NAT per AZ, multi-AZ RDS with deletion protection, bigger
   nodes): review them before the first prod apply.
-- `prod` sets `require_confirmation: true`: anything other than `plan`/`output` needs
-  `-e confirm_env=prod`, so a prod apply is always a deliberate, second step.
+- The playbooks default to `tf_action=plan`, which changes nothing. Changing infrastructure
+  is always two deliberate steps, in every environment: plan, then apply that plan.
 - What is **not** in Ansible: the Kubernetes side. Argo CD deploys from git, so per-environment
   chart values stay in git next to the chart (`helm/spring-boot-backend/values-<env>.yaml`)
   and the Argo CD applications in `argocd/apps/`.
@@ -121,8 +122,32 @@ devops-project/
 `ansible/inventories/staging`, change `env_name`, `key_prefix` and the values, then run the
 playbooks with `-i ansible/inventories/staging`. No Terraform change is needed.
 
-**Change a value:** edit the file in the environment's folder, run the playbook with
-`-e tf_action=plan`, review, then apply.
+**Change a value:** edit the file in the environment's folder, run the playbook (it plans by
+default), review, then run it again with `-e tf_action=apply`.
+
+### Plan, then apply
+
+`ansible-playbook ... 01-provision-infrastructure.yml` **plans** by default. For each stack it
+runs `terraform plan -out=...` and saves the plan, plus a small metadata file holding the git
+commit it was made from. `-e tf_action=apply` then applies **exactly those saved plans** and
+nothing else: what you reviewed is what runs, even if someone edits a file in between.
+
+`apply` refuses to start unless, for every selected stack, the plan
+
+- exists and is newer than `tf_plan_max_age_minutes` (default 120),
+- was made from the git commit that is checked out now (override only for a harmless
+  difference such as a README change: `-e tf_plan_ignore_commit=true`).
+
+This check runs for all stacks **before** the first one is applied, so a missing or stale plan
+cannot stop the run half way. A plan is single-use: it is deleted once its apply has started
+(even if the apply fails), so a second `apply` needs a new plan.
+
+Plans are stored in `~/.devops-project/tfplans/<env>/` (folder 0700, files 0600), outside the
+repository. **A plan file contains the variable values, so treat it as sensitive**: never copy
+it into git, a ticket or a shared folder. Change the location with `tf_plan_dir` if needed.
+
+`terraform plan -detailed-exitcode` is used, so "no changes" and "changes pending" are told
+apart in the output; both are successful runs.
 
 **Secrets** do not belong in these plain files. There are none today (RDS generates the
 database password). If one is ever needed, put it in an `ansible-vault` encrypted file in the
@@ -156,15 +181,44 @@ Everything below is run from the `devops-project` folder.
 
 ## Step 1 - Provision the infrastructure
 
+Provisioning is always **plan, read it, apply it**. Both commands are the same playbook; only
+`tf_action` differs, and `plan` is the default.
+
+**An environment that already exists** (all stacks applied before):
+
 ```bash
-# preview, then create (about 20 minutes, mostly EKS and RDS)
-ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml -e tf_action=plan
+# 1. Plan every stack. Changes nothing; saves one plan per stack.
 ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml
 
-# prod: the same, but applying needs the explicit confirmation flag
-ansible-playbook -i ansible/inventories/prod ansible/playbooks/01-provision-infrastructure.yml -e tf_action=plan
-ansible-playbook -i ansible/inventories/prod ansible/playbooks/01-provision-infrastructure.yml -e confirm_env=prod
+# 2. Read the output ("CHANGES PENDING" or "No changes" is printed per stack).
+
+# 3. Apply exactly those plans (refuses if a plan is missing, older than 2 hours,
+#    or made from a different git commit than the one checked out now).
+ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml -e tf_action=apply
 ```
+
+**A brand-new environment** (first time, for example the first `dev` run). `eks` finds the
+VPC and `rds` finds the cluster's security group through the AWS API, so they cannot be
+planned until the stacks before them exist. Go one stack at a time, in this order:
+`vpc`, `eks`, `rds`, `s3-cloudfront`:
+
+```bash
+for STACK in vpc eks rds s3-cloudfront; do
+  ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml \
+    -e "{\"tf_services\": [\"$STACK\"]}"                                   # plan, then read it
+  read -p "Apply the $STACK plan? [y/N] " ok && [ "$ok" = y ] || break
+  ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml \
+    -e "{\"tf_services\": [\"$STACK\"]}" -e tf_action=apply
+done
+```
+
+Each pass takes the plan you just read and applies it. The whole thing takes about 20
+minutes, mostly EKS and RDS. The same loop works for `prod` with `-i ansible/inventories/prod`.
+
+**Changing one stack later** (for example the VPC): use the same two commands with
+`-e '{"tf_services": ["vpc"]}'`. If a change in one stack affects what a later stack looks up
+(subnets, tags, security groups), apply stack by stack as above instead of all at once,
+because a later stack's saved plan was computed before the earlier one changed.
 
 The playbook applies `vpc`, then `eks`, then `rds`, then `s3-cloudfront`. `plan` for `eks`
 and `rds` only works after the stacks before them exist (see [Design decisions](#design-decisions)).
@@ -189,13 +243,6 @@ playbook also points every stack folder at that environment's state, so afterwar
 `terraform -chdir=terraform/<stack> output -raw <name>` commands used later in this guide
 return that environment's values. **Run it again whenever you switch environment**, otherwise
 those commands read whichever environment was used last.
-
-**One stack only** (for example while changing the VPC):
-
-```bash
-ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml \
-  -e tf_action=plan -e '{"tf_services": ["vpc"]}'
-```
 
 Do not run `terraform apply` by hand in a stack folder: it has no variable values (they come
 from Ansible), which is the point.
@@ -437,8 +484,8 @@ to a new file and change the name, values file and namespace (and add the namesp
 
 **Change infrastructure.** For a value (size, CIDR, version, backup days, ...) edit the
 environment's file in `ansible/inventories/<env>/group_vars/all/`; for structure edit the
-Terraform. Then run `01-provision-infrastructure.yml` with `-e tf_action=plan`, review, and
-apply. Each stack can also be run on its own (see step 1). Try changes in `dev` first.
+Terraform. Then run `01-provision-infrastructure.yml` (plans), review, and run it again with
+`-e tf_action=apply`. Each stack can also be run on its own (see step 1). Try changes in `dev` first.
 
 **Upgrade versions.** Kubernetes: `cluster_version` in the environment's `eks.yml` (1.34
 leaves standard support on 2 Dec 2026). Argo CD: `argocd_chart_version` in the same file.
@@ -482,11 +529,14 @@ then destroy.
 |---|---|
 | `plan` of `eks`/`rds` fails with "no matching VPC" or "expected at least 2 private subnets" | The `vpc` (or `eks`) stack has not been applied yet; apply in order. |
 | Playbook stops with "No environment loaded" or "Missing input ... env_name" | You forgot `-i ansible/inventories/<env>`. |
-| Playbook stops with "Environment 'prod' is protected" | Review a `plan`, then re-run with `-e confirm_env=prod`. |
+| `apply` stops with "No saved plan for stack ... newer than N minutes" | You did not plan first, the plan is older than `tf_plan_max_age_minutes`, or it was already used (plans are single-use). Run the playbook without `-e tf_action=apply` to plan again. |
+| `apply` stops with "was made at git commit X but Y is checked out" | The code changed after you planned. Plan again so you apply what you reviewed (`-e tf_plan_ignore_commit=true` only for a harmless difference). |
+| `apply` stops with "has no metadata file" | The plan was not made by this playbook or was damaged. Plan again. |
+| `terraform apply` says the saved plan is stale ("Saved plan is stale") | The state changed after planning (another apply or a manual change). Plan again. |
 | Terraform says "No value for required variable X" | The variable is declared in `terraform/<stack>/variables.tf` but missing from the environment's `tf_vars_<stack>` (or `tf_vars_common`) in `ansible/inventories/<env>/group_vars/all/`. |
 | Terraform warns "Value for undeclared variable" | A key in the environment's variables has no matching `variable` block in that stack; remove it or declare it. |
 | `terraform output` in a stack folder shows another environment's values | The folder is initialised for the environment used last. Run `02-show-outputs.yml` with the right `-i`. |
-| `tf_action=plan` for `prod` complains about the state bucket | The bucket in `tf_backend` does not exist or your AWS identity cannot reach it. |
+| Planning `prod` complains about the state bucket | The bucket in `tf_backend` does not exist or your AWS identity cannot reach it. |
 | `kubectl` says unauthorized | You are using a different AWS identity than the one that created the cluster. Check `aws sts get-caller-identity`. |
 | `backend-dev` shows *ComparisonError* "database.host is required" | `values-dev.yaml` still has an empty `database.host`, or the change is not pushed. |
 | `backend-dev` shows "resource ... is not permitted in project ecommerce" | A new kind was added to the chart. Add it to `namespaceResourceWhitelist` in `argocd/apps/project-ecommerce.yaml`. |
@@ -517,6 +567,14 @@ then destroy.
   in `terraform/vpc/main.tf` and `terraform/eks/main.tf`; renaming one means changing the
   matching `data.tf` in `eks` and `rds`. Ordering is not visible to Terraform, so the
   playbook provides it (`vpc` -> `eks` -> `rds`).
+- **Apply what was reviewed.** `apply` runs a saved plan instead of re-planning, so a change
+  made between the review and the apply (a file edit, a different branch) cannot slip in.
+  A plan must be fresh, must come from the checked-out commit, and is used once. Terraform
+  itself also refuses a plan whose state has moved. There is no separate "confirm prod" flag
+  any more: the plan-then-apply flow is the deliberate second step in every environment. The
+  trade-off is that plan files contain variable values, so they are kept private and out of git.
+  In a team, the stronger form of this is a CI pipeline that plans on a pull request and applies
+  that same plan after approval (see What's next).
 - **No password in the repo.** RDS generates and rotates the master password and keeps it in
   Secrets Manager. It reaches the pods through a Kubernetes Secret (External Secrets
   Operator), never through git or Terraform variables.

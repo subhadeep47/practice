@@ -17,3 +17,11 @@ tf_backend_args:
   - "-backend-config=region={{ tf_backend.region }}"
   - "-backend-config=encrypt={{ tf_backend.encrypt | default(true) | string | lower }}"
   - "-backend-config=use_lockfile={{ tf_backend.use_lockfile | default(true) | string | lower }}"
+
+# Saved plan of this stack and its metadata (commit it was made from, when).
+tf_plan_file: "{{ tf_plan_dir }}/{{ tf_service }}.tfplan"
+tf_plan_meta_file: "{{ tf_plan_dir }}/{{ tf_service }}.meta.json"
+
+# Git commit currently checked out; empty when git is not available. Filled from the result
+# of the `git rev-parse HEAD` task (tf_git_head).
+tf_commit: "{{ (tf_git_head.stdout | default('') | trim) if (tf_git_head.rc | default(1)) == 0 else '' }}"

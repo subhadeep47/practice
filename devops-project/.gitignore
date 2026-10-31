@@ -1,0 +1,4 @@
+# Saved Terraform plans contain variable values and must never be committed
+*.tfplan
+*.meta.json
+tfplans/

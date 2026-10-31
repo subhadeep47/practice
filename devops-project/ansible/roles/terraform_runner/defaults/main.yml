@@ -7,7 +7,9 @@
 # tf_vars_<stack> per Terraform stack. See the role README.
 
 # plan | apply | destroy | output
-tf_action: apply
+# The default is `plan` on purpose: running a playbook without flags can never change anything.
+# `apply` only runs a saved, fresh plan that was created by a previous `plan` run.
+tf_action: plan
 
 # Terraform executable
 tf_bin: terraform
@@ -18,3 +20,16 @@ tf_root: "{{ playbook_dir }}/../../terraform"
 # Extra environment variables for the terraform process, e.g. {AWS_PROFILE: dev-account}.
 # Environments override this in their group_vars.
 tf_process_env: {}
+
+# Where saved plans wait between `plan` and `apply`. A plan file contains the variable
+# values, so this folder is created private (0700) and files in it are 0600. It must stay
+# out of git. A plan is single-use: it is deleted once an apply has been attempted.
+tf_plan_dir: "{{ lookup('env', 'HOME') | default('/tmp', true) }}/.devops-project/tfplans/{{ env_name }}"
+
+# A saved plan older than this is refused: the world has probably moved on, plan again.
+tf_plan_max_age_minutes: 120
+
+# `apply` refuses a plan that was made from a different git commit than the one checked out
+# now. Set to true only if you know the difference does not touch Terraform
+# (for example a README-only commit).
+tf_plan_ignore_commit: false

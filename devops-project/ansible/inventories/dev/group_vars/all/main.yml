@@ -5,9 +5,6 @@
 
 env_name: dev
 
-# true = apply/destroy need `-e confirm_env=<env_name>` (a guard against mistakes).
-require_confirmation: false
-
 # Region of this environment's resources (re-used by the stack values below).
 aws_region: us-east-1
 

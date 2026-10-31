@@ -3,6 +3,15 @@
 #
 # Runs Terraform for ONE stack, feeding it the values of the loaded environment inventory.
 # Required: tf_service (a folder under tf_root). Optional: tf_action (see defaults/main.yml).
+#
+# Actions:
+#   plan     terraform plan -out=<saved plan>; nothing in AWS changes. Stores the plan and a
+#            small metadata file (git commit) in tf_plan_dir.
+#   apply    applies ONLY the saved plan from a previous `plan`, after checking that it is
+#            fresh and was made from the current git commit. No variables are passed, because
+#            the plan already contains them. The plan is deleted afterwards (single use).
+#   destroy  terraform destroy -auto-approve (the playbook asks you to type the environment name).
+#   output   terraform output (read-only).
 - name: Validate role inputs
   ansible.builtin.assert:
     that:
@@ -23,19 +32,51 @@
   environment: "{{ {'TF_IN_AUTOMATION': '1'} | combine(tf_process_env) }}"
   vars:
     tf_dir: "{{ tf_root }}/{{ tf_service }}"
+    # plan:    -out saves the plan;   apply: the saved plan file is the only argument
+    # destroy: variables + auto-approve (typed confirmation happens in the playbook)
     tf_action_args: >-
       {{ [] if tf_action == 'output'
-         else ['-input=false']
-              + ([] if tf_action == 'plan' else ['-auto-approve'])
-              + ['-var-file=' ~ tf_varfile.path] }}
+         else (['-input=false', '-detailed-exitcode', '-out=' ~ tf_plan_file, '-var-file=' ~ tf_varfile.path]
+               if tf_action == 'plan'
+               else (['-input=false', tf_plan_file]
+                     if tf_action == 'apply'
+                     else ['-input=false', '-auto-approve', '-var-file=' ~ tf_varfile.path])) }}
   block:
+    # Reset on every run: registered/fact variables survive between the stacks of a loop.
+    - name: Reset the apply marker
+      ansible.builtin.set_fact:
+        tf_apply_attempted: false
+
+    # Re-check right before applying: catches a plan that went stale while earlier stacks applied.
+    - name: Verify the saved plan before applying
+      ansible.builtin.include_tasks: check_saved_plan.yml
+      when: tf_action == 'apply'
+
+    - name: Make sure the plan directory exists and is private
+      ansible.builtin.file:
+        path: "{{ tf_plan_dir }}"
+        state: directory
+        mode: "0700"
+      when: tf_action == 'plan'
+
+    - name: Get the current git commit
+      ansible.builtin.command:
+        argv: [git, rev-parse, HEAD]
+        chdir: "{{ tf_root }}"
+      register: tf_git_head
+      changed_when: false
+      failed_when: false
+      when: tf_action == 'plan'
+
+    # Only plan and destroy take variables. apply uses the values stored inside the saved plan
+    # (Terraform refuses -var-file together with a plan file).
     - name: Create a temporary variable file
       ansible.builtin.tempfile:
         state: file
         prefix: "tfvars-{{ env_name }}-{{ tf_service }}-"
         suffix: .json
       register: tf_varfile
-      when: tf_action != 'output'
+      when: tf_action in ['plan', 'destroy']
       changed_when: false
 
     - name: Write the environment values for this stack
@@ -43,7 +84,7 @@
         dest: "{{ tf_varfile.path }}"
         content: "{{ tf_stack_vars | to_nice_json }}"
         mode: "0600"
-      when: tf_action != 'output'
+      when: tf_action in ['plan', 'destroy']
       changed_when: false
       no_log: true  # keeps values out of the log, in case a secret is added later
 
@@ -53,19 +94,49 @@
         chdir: "{{ tf_dir }}"
       changed_when: false
 
+    # From here on the plan is considered used, whatever the outcome (see `always`).
+    - name: Mark that the apply is starting
+      ansible.builtin.set_fact:
+        tf_apply_attempted: true
+      when: tf_action == 'apply'
+
     - name: "Terraform {{ tf_action }} in {{ tf_service }} for environment {{ env_name }}"
       ansible.builtin.command:
         argv: "{{ [tf_bin, tf_action] + tf_action_args }}"
         chdir: "{{ tf_dir }}"
       register: tf_result
+      # `plan -detailed-exitcode`: 0 = no changes, 2 = changes to apply, 1 = error.
+      failed_when: tf_result.rc not in ([0, 2] if tf_action == 'plan' else [0])
       changed_when:
         - tf_action in ['apply', 'destroy']
         - "'0 added, 0 changed, 0 destroyed' not in tf_result.stdout"
         - "'Resources: 0 destroyed' not in tf_result.stdout"
 
+    - name: Restrict the saved plan to its owner
+      ansible.builtin.file:
+        path: "{{ tf_plan_file }}"
+        mode: "0600"
+      when: tf_action == 'plan'
+
+    - name: Record which git commit the plan was made from
+      ansible.builtin.copy:
+        dest: "{{ tf_plan_meta_file }}"
+        content: "{{ {'env': env_name, 'stack': tf_service, 'commit': tf_commit, 'created': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ')} | to_nice_json }}"
+        mode: "0600"
+      when: tf_action == 'plan'
+      changed_when: false
+
     - name: "Display Terraform output for {{ tf_service }}"
       ansible.builtin.debug:
         msg: "{{ tf_result.stdout_lines }}"
+
+    - name: "Plan summary for {{ tf_service }}"
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'CHANGES PENDING' if tf_result.rc == 2 else 'No changes' }} in {{ tf_service }}
+          ({{ env_name }}). Plan saved to {{ tf_plan_file }} and valid for
+          {{ tf_plan_max_age_minutes }} minutes. After reviewing it, apply with -e tf_action=apply.
+      when: tf_action == 'plan'
 
   rescue:
     - name: "Fail with Terraform error details"
@@ -79,5 +150,18 @@
       ansible.builtin.file:
         path: "{{ tf_varfile.path }}"
         state: absent
-      when: tf_varfile.path is defined
+      when: tf_action in ['plan', 'destroy'] and tf_varfile.path is defined
+      changed_when: false
+
+    # Single use. After a failed apply the plan is stale anyway (state may have changed), and
+    # it contains variable values, so it is not left lying around. Only removed when the apply
+    # was actually started, so a refused apply (missing/old plan) never deletes anything.
+    - name: Remove the used plan
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ tf_plan_file }}"
+        - "{{ tf_plan_meta_file }}"
+      when: tf_action == 'apply' and tf_apply_attempted | bool
       changed_when: false
