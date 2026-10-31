@@ -10,14 +10,12 @@ For one stack and one environment it:
 3. runs `terraform init -reconfigure` with `-backend-config=...` flags built from `tf_backend`,
    so every environment and stack has its own state file,
 4. runs the action:
-   - `plan`: `terraform plan -out=<saved plan> -var-file=<that file>`; stores the plan and a
-     metadata file (git commit, time) in `tf_plan_dir`. Nothing in AWS changes. **Default.**
-   - `apply`: `terraform apply <saved plan>`; no variables are passed (they are inside the plan).
-     Refuses a missing plan, one older than `tf_plan_max_age_minutes`, or one made from a
-     different git commit (`tasks/check_saved_plan.yml`). The plan is deleted once the apply has
-     started, so each plan is used once.
+   - `plan`: `terraform plan -detailed-exitcode -var-file=<that file>`. Nothing in AWS changes.
+     **Default.** Exit code 2 ("changes pending") counts as success.
+   - `apply`: `terraform apply -auto-approve -var-file=<that file>`. It plans again and applies;
+     put a human approval between a plan job and an apply job (see the project README).
    - `destroy`: `terraform destroy -auto-approve -var-file=<that file>` (the destroy playbook
-     asks you to type the environment name first).
+     requires `destroy_confirmation` to equal the environment name).
    - `output`: `terraform output`.
 
 The Terraform code itself contains no environment-specific values.
@@ -44,10 +42,7 @@ The state key is `<tf_backend.key_prefix>/<stack>/terraform.tfstate`.
 | Variable | Default | Description |
 |---|---|---|
 | `tf_service` | (required) | Stack folder: `vpc`, `eks`, `rds`, `s3-cloudfront` |
-| `tf_action` | `plan` | `plan` (default, changes nothing), `apply` (applies the saved plan), `destroy` or `output` |
-| `tf_plan_dir` | `~/.devops-project/tfplans/<env>` | Where saved plans wait. Created 0700, files 0600. Plans contain variable values: keep them out of git |
-| `tf_plan_max_age_minutes` | `120` | A saved plan older than this is refused |
-| `tf_plan_ignore_commit` | `false` | Allow applying a plan made from another git commit (only for harmless differences) |
+| `tf_action` | `plan` | `plan` (default, changes nothing), `apply`, `destroy` or `output` |
 | `tf_bin` | `terraform` | Terraform executable |
 | `tf_root` | `<playbook_dir>/../../terraform` | Folder containing the stacks |
 | `tf_process_env` | `{}` | Extra environment variables for the process, e.g. `AWS_PROFILE` |
@@ -59,14 +54,11 @@ The state key is `<tf_backend.key_prefix>/<stack>/terraform.tfstate`.
     name: terraform_runner
   vars:
     tf_service: vpc
-    tf_action: plan      # later: tf_action: apply, which uses the plan saved here
+    tf_action: plan
 ```
 
-To check plans without running anything (the playbook does this for all stacks before the
-first apply): `include_role` with `tasks_from: check_saved_plan`.
-
-Run it with an environment inventory so the variables above exist:
-`ansible-playbook -i ansible/inventories/dev <playbook>`.
+Run it with an environment inventory so the variables above exist: the AWX inventory sourced
+from `ansible/inventories/<env>`, or `-i ansible/inventories/<env>` on the command line.
 
 ## License
 

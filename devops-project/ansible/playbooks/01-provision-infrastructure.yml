@@ -1,25 +1,19 @@
 ---
-# Provision the full stack for ONE environment, in dependency order (see vars/stacks.yml).
-# The environment is chosen by the inventory; all values come from
-# ansible/inventories/<env>/group_vars.
+# Provision the full stack for ONE environment, in dependency order (vars/stacks.yml:
+# vpc -> eks -> rds -> s3-cloudfront). The environment is chosen by the inventory; all values
+# come from its group_vars (ansible/inventories/<env>/group_vars).
 #
-# Two phases, always in this order (run from the devops-project folder):
+# tf_action decides what happens (default plan, which changes nothing):
+#   plan   terraform plan for every stack
+#   apply  terraform apply for every stack, in order
 #
-#   1. PLAN (default, changes nothing): saves a plan per stack
-#        ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml
-#      Read the plan output.
+# In AWX: one job template per action ("... plan" with {"tf_action": "plan"}, "... apply" with
+# {"tf_action": "apply"}), joined in a workflow with an approval step between them (README).
+# CLI equivalent, from the devops-project folder:
+#   ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml
+#   ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml -e tf_action=apply
 #
-#   2. APPLY: applies exactly the saved plans, nothing else
-#        ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml -e tf_action=apply
-#
-# Apply refuses to start unless EVERY stack has a saved plan that is fresh (see
-# tf_plan_max_age_minutes) and made from the commit that is checked out now. This check runs
-# before the first stack is applied, so it cannot stop half way for that reason.
-#
-# A brand-new environment cannot be planned in one go (eks needs the vpc to exist, rds needs
-# eks). Bootstrap one stack at a time instead, see the README:
-#   ... -e '{"tf_services": ["vpc"]}'                  (plan)
-#   ... -e '{"tf_services": ["vpc"]}' -e tf_action=apply
+# Optional: tf_services (a list, e.g. {"tf_services": ["vpc"]}) limits the run to some stacks.
 - name: Provision Full-Stack Infrastructure via Terraform
   hosts: localhost
   connection: local
@@ -35,25 +29,14 @@
     - name: Require an environment inventory
       ansible.builtin.assert:
         that: env_name is defined
-        fail_msg: "No environment loaded. Choose one with -i, e.g. -i ansible/inventories/dev"
+        fail_msg: "No environment loaded. Select the environment's inventory (AWX) or pass -i ansible/inventories/<env> (CLI)."
         quiet: true
 
     - name: Require a known action
       ansible.builtin.assert:
-        that: (tf_action | default('plan')) in ['plan', 'apply', 'output']
-        fail_msg: "Use tf_action=plan (default) or tf_action=apply here. Destroying is playbook 99."
+        that: (tf_action | default('plan')) in ['plan', 'apply']
+        fail_msg: "tf_action must be plan (default) or apply here. Outputs: playbook 02. Destroying: playbook 99."
         quiet: true
-
-    # All-or-nothing pre-flight: every selected stack must have a usable saved plan BEFORE the
-    # first one is applied.
-    - name: Pre-flight, check the saved plan of every stack
-      ansible.builtin.include_role:
-        name: terraform_runner
-        tasks_from: check_saved_plan
-      loop: "{{ tf_services }}"
-      loop_control:
-        loop_var: tf_service
-      when: (tf_action | default('plan')) == 'apply'
 
   tasks:
     - name: Run Terraform for each stack in order

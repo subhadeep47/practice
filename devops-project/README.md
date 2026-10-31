@@ -101,8 +101,8 @@ devops-project/
 
 - On every run the `terraform_runner` role merges `tf_vars_common` with the stack's own
   dictionary, writes the result to a temporary JSON var file (mode 0600, deleted afterwards)
-  and runs `terraform plan -out=<saved plan> -var-file=<that file>` (or `destroy`). `apply`
-  takes no variables: it applies the saved plan (see [Plan, then apply](#plan-then-apply)). It also runs
+  and runs `terraform plan | apply | destroy -var-file=<that file>`, depending on `tf_action`
+  (see [Plan, then apply](#plan-then-apply)). It also runs
   `terraform init -reconfigure` with `-backend-config` flags built from `tf_backend`, so every
   environment and stack has its own state file
   (`<key_prefix>/<stack>/terraform.tfstate`, e.g. `devops-project/dev/vpc/terraform.tfstate`).
@@ -113,7 +113,8 @@ devops-project/
   (separate CIDR, three AZs, one NAT per AZ, multi-AZ RDS with deletion protection, bigger
   nodes): review them before the first prod apply.
 - The playbooks default to `tf_action=plan`, which changes nothing. Changing infrastructure
-  is always two deliberate steps, in every environment: plan, then apply that plan.
+  is always two deliberate steps, in every environment: a plan job, a human approval, then an
+  apply job.
 - What is **not** in Ansible: the Kubernetes side. Argo CD deploys from git, so per-environment
   chart values stay in git next to the chart (`helm/spring-boot-backend/values-<env>.yaml`)
   and the Argo CD applications in `argocd/apps/`.
@@ -122,36 +123,73 @@ devops-project/
 `ansible/inventories/staging`, change `env_name`, `key_prefix` and the values, then run the
 playbooks with `-i ansible/inventories/staging`. No Terraform change is needed.
 
-**Change a value:** edit the file in the environment's folder, run the playbook (it plans by
-default), review, then run it again with `-e tf_action=apply`.
+**Change a value:** edit the file in the environment's folder, push, run the plan job, read it,
+approve, and the apply job runs.
 
 ### Plan, then apply
 
-`ansible-playbook ... 01-provision-infrastructure.yml` **plans** by default. For each stack it
-runs `terraform plan -out=...` and saves the plan, plus a small metadata file holding the git
-commit it was made from. `-e tf_action=apply` then applies **exactly those saved plans** and
-nothing else: what you reviewed is what runs, even if someone edits a file in between.
+`01-provision-infrastructure.yml` has two modes, chosen by the variable `tf_action`:
 
-`apply` refuses to start unless, for every selected stack, the plan
+| `tf_action` | What happens |
+|---|---|
+| `plan` (default) | `terraform plan` for each stack, in order. Changes nothing. The plan is in the job output, with a "CHANGES PENDING" or "No changes" line per stack. |
+| `apply` | `terraform apply -auto-approve` for each stack, in order (it plans again and applies). |
 
-- exists and is newer than `tf_plan_max_age_minutes` (default 120),
-- was made from the git commit that is checked out now (override only for a harmless
-  difference such as a README change: `-e tf_plan_ignore_commit=true`).
+`apply` does not need a plan from an earlier run: it works out its own. The human check is an
+**approval between the two jobs**, not a file passed between them. The consequence: the apply
+plans again, so if the code, the values or AWS itself changed after the plan was approved, the
+apply does what the new plan says. Keep the window between approval and apply short and do
+not push in between (see [Design decisions](#design-decisions)).
 
-This check runs for all stacks **before** the first one is applied, so a missing or stale plan
-cannot stop the run half way. A plan is single-use: it is deleted once its apply has started
-(even if the apply fails), so a second `apply` needs a new plan.
+You never choose the stacks: the playbook walks the order in `ansible/playbooks/vars/stacks.yml`
+(`vpc`, `eks`, `rds`, `s3-cloudfront`) by itself. `tf_services` exists only as an optional
+override to limit a run to some stacks, for example `{"tf_services": ["vpc"]}`.
 
-Plans are stored in `~/.devops-project/tfplans/<env>/` (folder 0700, files 0600), outside the
-repository. **A plan file contains the variable values, so treat it as sensitive**: never copy
-it into git, a ticket or a shared folder. Change the location with `tf_plan_dir` if needed.
+### Running from AWX / Ansible Tower
 
-`terraform plan -detailed-exitcode` is used, so "no changes" and "changes pending" are told
-apart in the output; both are successful runs.
+Provisioning is meant to run from AWX, not from a laptop. Set up once per environment:
 
-**Secrets** do not belong in these plain files. There are none today (RDS generates the
-database password). If one is ever needed, put it in an `ansible-vault` encrypted file in the
-same `group_vars/all/` folder; the role writes the var file without logging its content.
+1. **Project:** this git repository, branch `main`.
+2. **Inventory** `devops-dev`: add an *inventory source* of type *Sourced from a Project*, using
+   that project and the path `devops-project/ansible/inventories/dev`. That loads `hosts.yml`
+   and `group_vars/all/*.yml`, so every `env_name`, `tf_backend` and `tf_vars_*` value comes
+   from the environment folder. Do the same for prod with `.../inventories/prod`. Enable
+   *Update on launch* so a push is picked up.
+3. **Credentials:** an *Amazon Web Services* credential for the environment's account (its
+   keys become environment variables of the job and reach Terraform), or run the job where an
+   IAM role is attached.
+4. **Execution environment:** it must contain `terraform` >= 1.10. Build a custom execution
+   environment image if yours does not.
+5. **Job templates** (all with *Playbook* from the project, *Inventory* `devops-dev`):
+
+   | Template | Playbook | Extra variables (JSON) |
+   |---|---|---|
+   | `dev: provision, plan` | `devops-project/ansible/playbooks/01-provision-infrastructure.yml` | `{"tf_action": "plan"}` |
+   | `dev: provision, apply` | `devops-project/ansible/playbooks/01-provision-infrastructure.yml` | `{"tf_action": "apply"}` |
+   | `dev: show outputs` | `devops-project/ansible/playbooks/02-show-outputs.yml` | (none) |
+   | `dev: destroy` | `devops-project/ansible/playbooks/99-destroy-infrastructure.yml` | (none); add a *survey* question with variable name `destroy_confirmation` (text) asking the user to type the environment name |
+
+   Two separate templates, rather than one with a prompt, mean nobody can apply by choosing
+   the wrong value in the plan template.
+6. **Workflow** `dev: provision` = `dev: provision, plan` -> **Approval** node -> `dev: provision, apply`.
+   Under the approval node, set *On success* to the apply template. Restrict who may approve
+   (and who may launch the apply template) with AWX roles. In AWX the playbook itself cannot
+   pause for a human, which is why the approval is a workflow node.
+
+**A brand-new environment.** Planning `eks` needs the VPC to exist (it finds it through the AWS
+API), so the plan job fails at `eks` the first time. That is expected: read the `vpc` plan it
+prints, then run the *apply* template. It plans and applies each stack in order, so `eks` sees
+the VPC it needs. From the second run on, the workflow works as described. Alternatively launch
+the plan template once with `{"tf_action": "plan", "tf_services": ["vpc"]}` (enable *Prompt on
+launch* for extra variables).
+
+**Without AWX** (for example for a quick first run), the same playbooks run from the command
+line in the `devops-project` folder:
+
+```bash
+ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml                    # plan
+ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml -e tf_action=apply # apply
+```
 
 ## Prerequisites
 
@@ -181,68 +219,31 @@ Everything below is run from the `devops-project` folder.
 
 ## Step 1 - Provision the infrastructure
 
-Provisioning is always **plan, read it, apply it**. Both commands are the same playbook; only
-`tf_action` differs, and `plan` is the default.
-
-**An environment that already exists** (all stacks applied before):
-
-```bash
-# 1. Plan every stack. Changes nothing; saves one plan per stack.
-ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml
-
-# 2. Read the output ("CHANGES PENDING" or "No changes" is printed per stack).
-
-# 3. Apply exactly those plans (refuses if a plan is missing, older than 2 hours,
-#    or made from a different git commit than the one checked out now).
-ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml -e tf_action=apply
-```
-
-**A brand-new environment** (first time, for example the first `dev` run). `eks` finds the
-VPC and `rds` finds the cluster's security group through the AWS API, so they cannot be
-planned until the stacks before them exist. Go one stack at a time, in this order:
-`vpc`, `eks`, `rds`, `s3-cloudfront`:
-
-```bash
-for STACK in vpc eks rds s3-cloudfront; do
-  ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml \
-    -e "{\"tf_services\": [\"$STACK\"]}"                                   # plan, then read it
-  read -p "Apply the $STACK plan? [y/N] " ok && [ "$ok" = y ] || break
-  ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infrastructure.yml \
-    -e "{\"tf_services\": [\"$STACK\"]}" -e tf_action=apply
-done
-```
-
-Each pass takes the plan you just read and applies it. The whole thing takes about 20
-minutes, mostly EKS and RDS. The same loop works for `prod` with `-i ansible/inventories/prod`.
-
-**Changing one stack later** (for example the VPC): use the same two commands with
-`-e '{"tf_services": ["vpc"]}'`. If a change in one stack affects what a later stack looks up
-(subnets, tags, security groups), apply stack by stack as above instead of all at once,
-because a later stack's saved plan was computed before the earlier one changed.
+Run the `dev: provision` workflow in AWX (see [Running from AWX](#running-from-awx--ansible-tower)):
+the plan job runs, you read its output, approve, and the apply job creates everything in
+order. For a brand-new environment follow the note about the first run in that section.
+(CLI equivalent: the two `ansible-playbook` commands in that section.)
 
 The playbook applies `vpc`, then `eks`, then `rds`, then `s3-cloudfront`. `plan` for `eks`
 and `rds` only works after the stacks before them exist (see [Design decisions](#design-decisions)).
-The rest of this guide shows `dev`; for another environment change the `-i` path (and the
-`ENV` variable in step 2).
+The rest of this guide shows `dev`; for another environment use that environment's inventory
+and templates (and change `ENV` in step 2).
 
 This creates a VPC with public and private subnets, an EKS cluster (Kubernetes 1.35,
 managed node group, **Argo CD installed by Helm**), an encrypted RDS PostgreSQL 16 instance
 whose password RDS generates and keeps in Secrets Manager, and the S3 + CloudFront frontend.
-These resources cost money while they exist, notably the EKS control plane, the NAT
-gateway, the nodes and RDS. [Tear down](#tear-down) when you are not using them.
+It takes about 20 minutes, mostly EKS and RDS. These resources cost money while they exist,
+notably the EKS control plane, the NAT gateway, the nodes and RDS. [Tear down](#tear-down)
+when you are not using them.
 
-**Outputs.** Print them for the environment with
-
-```bash
-ansible-playbook -i ansible/inventories/dev ansible/playbooks/02-show-outputs.yml
-```
-
-Useful ones: `vpc_id`, `db_endpoint`, `db_master_secret_arn`, `cluster_name`,
-`s3_bucket_name`, `cloudfront_domain_name`, `cloudfront_distribution_id`. Running this
-playbook also points every stack folder at that environment's state, so afterwards the
+**Outputs.** Run the `dev: show outputs` template (CLI: `02-show-outputs.yml`). Useful ones:
+`vpc_id`, `db_endpoint`, `db_master_secret_arn`, `cluster_name`, `s3_bucket_name`,
+`cloudfront_domain_name`, `cloudfront_distribution_id`. When run on a machine with the repo,
+the playbook also points every stack folder at that environment's state, so the
 `terraform -chdir=terraform/<stack> output -raw <name>` commands used later in this guide
-return that environment's values. **Run it again whenever you switch environment**, otherwise
-those commands read whichever environment was used last.
+return that environment's values (run the playbook with `-i ansible/inventories/<env>` again
+whenever you switch environment). In AWX the job runs in a temporary container, so read the
+values from the job output instead.
 
 Do not run `terraform apply` by hand in a stack folder: it has no variable values (they come
 from Ansible), which is the point.
@@ -484,8 +485,8 @@ to a new file and change the name, values file and namespace (and add the namesp
 
 **Change infrastructure.** For a value (size, CIDR, version, backup days, ...) edit the
 environment's file in `ansible/inventories/<env>/group_vars/all/`; for structure edit the
-Terraform. Then run `01-provision-infrastructure.yml` (plans), review, and run it again with
-`-e tf_action=apply`. Each stack can also be run on its own (see step 1). Try changes in `dev` first.
+Terraform. Push, run the plan job, read it, approve, and the apply job runs. A single stack can be run
+on its own with `tf_services` (see above). Try changes in `dev` first.
 
 **Upgrade versions.** Kubernetes: `cluster_version` in the environment's `eks.yml` (1.34
 leaves standard support on 2 Dec 2026). Argo CD: `argocd_chart_version` in the same file.
@@ -512,8 +513,9 @@ helm -n external-secrets uninstall external-secrets
 eksctl delete iamserviceaccount --cluster $CLUSTER --region $AWS_REGION \
   --namespace external-secrets --name external-secrets
 
-# 3. Destroy the infrastructure (asks you to type the environment name)
-ansible-playbook -i ansible/inventories/$ENV ansible/playbooks/99-destroy-infrastructure.yml
+# 3. Destroy the infrastructure. In AWX run `dev: destroy` and type the environment name in the
+#    survey. CLI equivalent:
+ansible-playbook -i ansible/inventories/$ENV ansible/playbooks/99-destroy-infrastructure.yml -e destroy_confirmation=$ENV
 ```
 
 The IAM policies you created by hand (`AWSLoadBalancerControllerIAMPolicy`,
@@ -529,10 +531,10 @@ then destroy.
 |---|---|
 | `plan` of `eks`/`rds` fails with "no matching VPC" or "expected at least 2 private subnets" | The `vpc` (or `eks`) stack has not been applied yet; apply in order. |
 | Playbook stops with "No environment loaded" or "Missing input ... env_name" | You forgot `-i ansible/inventories/<env>`. |
-| `apply` stops with "No saved plan for stack ... newer than N minutes" | You did not plan first, the plan is older than `tf_plan_max_age_minutes`, or it was already used (plans are single-use). Run the playbook without `-e tf_action=apply` to plan again. |
-| `apply` stops with "was made at git commit X but Y is checked out" | The code changed after you planned. Plan again so you apply what you reviewed (`-e tf_plan_ignore_commit=true` only for a harmless difference). |
-| `apply` stops with "has no metadata file" | The plan was not made by this playbook or was damaged. Plan again. |
-| `terraform apply` says the saved plan is stale ("Saved plan is stale") | The state changed after planning (another apply or a manual change). Plan again. |
+| Playbook stops with "tf_action must be plan (default) or apply here" | The job template's extra variables hold another value. Use `{"tf_action": "plan"}` or `{"tf_action": "apply"}`. |
+| The plan job of a **new** environment fails at `eks` | Expected the first time: the VPC does not exist yet. Run the apply template (see "A brand-new environment"). |
+| Destroy stops with "Set destroy_confirmation to ..." | The survey answer (or `-e destroy_confirmation=`) is not exactly the environment name. |
+| `terraform: command not found` in an AWX job | The execution environment has no Terraform >= 1.10. Use an execution environment that includes it. |
 | Terraform says "No value for required variable X" | The variable is declared in `terraform/<stack>/variables.tf` but missing from the environment's `tf_vars_<stack>` (or `tf_vars_common`) in `ansible/inventories/<env>/group_vars/all/`. |
 | Terraform warns "Value for undeclared variable" | A key in the environment's variables has no matching `variable` block in that stack; remove it or declare it. |
 | `terraform output` in a stack folder shows another environment's values | The folder is initialised for the environment used last. Run `02-show-outputs.yml` with the right `-i`. |
@@ -567,14 +569,15 @@ then destroy.
   in `terraform/vpc/main.tf` and `terraform/eks/main.tf`; renaming one means changing the
   matching `data.tf` in `eks` and `rds`. Ordering is not visible to Terraform, so the
   playbook provides it (`vpc` -> `eks` -> `rds`).
-- **Apply what was reviewed.** `apply` runs a saved plan instead of re-planning, so a change
-  made between the review and the apply (a file edit, a different branch) cannot slip in.
-  A plan must be fresh, must come from the checked-out commit, and is used once. Terraform
-  itself also refuses a plan whose state has moved. There is no separate "confirm prod" flag
-  any more: the plan-then-apply flow is the deliberate second step in every environment. The
-  trade-off is that plan files contain variable values, so they are kept private and out of git.
-  In a team, the stronger form of this is a CI pipeline that plans on a pull request and applies
-  that same plan after approval (see What's next).
+- **Plan job, approval, apply job.** Changing infrastructure is two jobs with a human approval
+  between them, so nothing changes without someone having read the plan. The apply job plans
+  again rather than replaying a stored plan: that avoids a plan file (it contains every
+  variable value and would need private shared storage between AWX's throwaway job
+  containers), at the cost that the applied plan is not guaranteed identical to the approved
+  one if something changed in between. Terraform's own state lock still prevents concurrent
+  runs. Both jobs use the project's current revision, so do not push between approval and apply.
+- **Ordering lives in the playbook.** `vars/stacks.yml` holds the order and the playbook loops
+  over it, so the operator never lists stacks.
 - **No password in the repo.** RDS generates and rotates the master password and keeps it in
   Secrets Manager. It reaches the pods through a Kubernetes Secret (External Secrets
   Operator), never through git or Terraform variables.
