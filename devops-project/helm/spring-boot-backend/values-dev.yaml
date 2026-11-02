@@ -9,8 +9,11 @@ springProfile: dev
 # ---- EDIT BEFORE THE FIRST SYNC (see README, "Bootstrap Argo CD") -----------------------
 
 image:
-  # Your backend image, e.g. docker.io/<user>/<repo>.
-  repository: your-dockerhub-username/spring-boot-backend
+  # The ECR repository from the `ecr` stack: `repository_url` in the outputs job, e.g.
+  # 123456789012.dkr.ecr.us-east-1.amazonaws.com/fullstack-app/backend-dev
+  # Replace ACCOUNT_ID with your AWS account id. The nodes pull with their IAM role, so no
+  # image pull secret is needed.
+  repository: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/fullstack-app/backend-dev
   # Immutable tag (git SHA). Empty falls back to the chart appVersion, which is rarely what
   # you want. CI will update this line on every build.
   tag: ""

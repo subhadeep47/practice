@@ -24,11 +24,12 @@ folder only holds infrastructure and delivery.
 8. [Step 4 - Database credentials](#step-4---database-credentials)
 9. [Step 5 - Bootstrap Argo CD and deploy the backend](#step-5---bootstrap-argo-cd-and-deploy-the-backend)
 10. [Step 6 - Deploy the frontend](#step-6---deploy-the-frontend)
-11. [Day-2 operations](#day-2-operations)
-12. [Tear down](#tear-down)
-13. [Troubleshooting](#troubleshooting)
-14. [Design decisions](#design-decisions)
-15. [What's next](#whats-next)
+11. [Step 7 - Continuous integration](#step-7---continuous-integration)
+12. [Day-2 operations](#day-2-operations)
+13. [Tear down](#tear-down)
+14. [Troubleshooting](#troubleshooting)
+15. [Design decisions](#design-decisions)
+16. [What's next](#whats-next)
 
 ## Architecture
 
@@ -49,8 +50,10 @@ folder only holds infrastructure and delivery.
                      watches this git repo and syncs the chart
 ```
 
-Delivery flow: you push to `main` -> Argo CD notices (within about 3 minutes) -> renders
-`helm/spring-boot-backend` with `values-dev.yaml` -> applies it to the cluster.
+Delivery flow: a push to the backend repository -> GitHub Actions tests, builds and pushes the
+image to ECR, then commits the new tag to `values-dev.yaml` here -> Argo CD notices (within
+about 3 minutes) -> renders `helm/spring-boot-backend` with that file -> applies it to the
+cluster, where the nodes pull the image from ECR.
 
 ## Repository layout
 
@@ -75,13 +78,18 @@ devops-project/
 │   ├── vpc/             VPC, subnets, NAT                    (apply 1st)
 │   ├── eks/             EKS cluster + Argo CD (Helm)         (apply 2nd)
 │   ├── rds/             PostgreSQL + security group          (apply 3rd)
-│   └── s3-cloudfront/   React hosting                        (independent)
+│   ├── s3-cloudfront/   React hosting                        (independent)
+│   └── ecr/             backend image registry + GitHub push role (independent)
 ├── helm/spring-boot-backend/   chart; values-dev.yaml = desired state of dev
 ├── argocd/
 │   ├── root-app.yaml           applied by hand once; points Argo CD at argocd/apps
 │   └── apps/                   AppProject + Application manifests (managed by Argo CD)
-└── k8s/external-secrets/       ClusterSecretStore applied by hand (step 4A)
+├── k8s/external-secrets/       ClusterSecretStore applied by hand (step 4A)
+└── ci/                         pipeline templates to copy into the app repositories (step 7)
 ```
+
+GitHub Actions checks for this folder itself are in `.github/workflows/devops-project-ci.yml`
+at the repository root (GitHub only reads workflows from there).
 
 `ansible/playbooks/roles` is a **symlink** to `ansible/roles` (not a second copy of the role).
 Ansible finds roles in a `roles/` folder next to the playbook, and AWX starts from the
@@ -223,6 +231,7 @@ Consider turning on versioning for the bucket.
 |---|---|
 | Globally unique frontend bucket name | `ansible/inventories/<env>/group_vars/all/s3_cloudfront.yml` (`bucket_name_prefix`) |
 | State bucket, region, sizes, CIDRs, anything else per environment | the other files in `ansible/inventories/<env>/group_vars/all/` |
+| Your backend repository name (who may push images) | `ansible/inventories/<env>/group_vars/all/ecr.yml` (`github_oidc_subjects`) |
 | Backend image, DB host, secret settings | `helm/spring-boot-backend/values-dev.yaml` (step 5) |
 
 Everything below is run from the `devops-project` folder.
@@ -241,14 +250,16 @@ and templates (and change `ENV` in step 2).
 
 This creates a VPC with public and private subnets, an EKS cluster (Kubernetes 1.35,
 managed node group, **Argo CD installed by Helm**), an encrypted RDS PostgreSQL 16 instance
-whose password RDS generates and keeps in Secrets Manager, and the S3 + CloudFront frontend.
+whose password RDS generates and keeps in Secrets Manager, the S3 + CloudFront frontend, and
+an ECR repository for the backend image with the GitHub Actions push role.
 It takes about 20 minutes, mostly EKS and RDS. These resources cost money while they exist,
 notably the EKS control plane, the NAT gateway, the nodes and RDS. [Tear down](#tear-down)
 when you are not using them.
 
 **Outputs.** Run the `dev: show outputs` template (CLI: `02-show-outputs.yml`) and read the job
 output. Useful ones: `vpc_id`, `db_endpoint`, `db_master_secret_arn`, `cluster_name`,
-`s3_bucket_name`, `cloudfront_domain_name`, `cloudfront_distribution_id`. Terraform runs in AWX,
+`s3_bucket_name`, `cloudfront_domain_name`, `cloudfront_distribution_id`, `repository_url`,
+`ci_push_role_arn`. Terraform runs in AWX,
 not on your machine, so the commands later in this guide read what they need straight from AWS
 with the `aws` CLI, or ask you to take a value from this job output.
 
@@ -404,8 +415,8 @@ Argo CD deploys what is in git, so the environment settings go in
 
 | Key | Value |
 |---|---|
-| `image.repository` | your backend image, e.g. `<dockerhub-user>/spring-boot-backend` |
-| `image.tag` | an immutable tag such as the git SHA (never `latest`) |
+| `image.repository` | the ECR repository: `repository_url` from the outputs job (the `ecr` stack is created in step 1) |
+| `image.tag` | an immutable tag such as the git SHA (never `latest`). CI sets it after step 7; for a first manual test push an image yourself (see step 7) |
 | `database.host` | `aws rds describe-db-instances --region $AWS_REGION --db-instance-identifier app-postgres-$ENV --query 'DBInstances[0].Endpoint.Address' --output text` (or `db_endpoint` from the outputs job) |
 | `externalSecret.*` | only for step 4 option A |
 
@@ -415,14 +426,10 @@ git commit -m "dev: set image and database host"
 git push origin main
 ```
 
-Private image? Create a pull secret in the `ecommerce` namespace and reference it in the values:
-
-```bash
-kubectl create namespace ecommerce --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n ecommerce create secret docker-registry regcred \
-  --docker-username=<user> --docker-password=<access-token>
-# values-dev.yaml:  imagePullSecrets: [{ name: regcred }]
-```
+The image comes from ECR in the same account, which the worker nodes pull from with their IAM
+role: no pull secret is needed. (Only for an image from another private registry, such as
+Docker Hub, create a `docker-registry` secret in the `ecommerce` namespace and set
+`imagePullSecrets: [{ name: regcred }]` in the values.)
 
 Private git repository? Register it with Argo CD first (`argocd repo add <url> --username ... --password <token>`,
 or *Settings -> Repositories* in the UI).
@@ -479,11 +486,54 @@ CloudFront can read it. Missing paths fall back to `/index.html`, so React Route
 work. The frontend calls the backend at the ALB address, which is a different origin, so the
 Spring Boot app needs CORS configured for the CloudFront domain.
 
+## Step 7 - Continuous integration
+
+The backend image is built and released by GitHub Actions. Because the backend source is in its
+own repository, the workflow lives there; this project provides the template and the
+infrastructure for it (`ci/` folder, full setup in `ci/README.md`).
+
+What happens on every push to the backend repository's `main`:
+
+1. `mvn verify` builds and tests (pull requests stop here).
+2. The job assumes the AWS role `ci_push_role_arn` through **OIDC**, so no AWS keys are stored in
+   GitHub, and pushes the image to ECR tagged with the git commit. The repository is
+   immutable, so a tag always means the same image.
+3. The job commits that tag to `helm/spring-boot-backend/values-dev.yaml` in this repository.
+4. Argo CD syncs the change and Kubernetes rolls the pods over to the new image.
+
+Set up once:
+
+1. The `ecr` stack is created in step 1 with the rest. Make sure `github_oidc_subjects` in
+   `ansible/inventories/dev/group_vars/all/ecr.yml` names your backend repository (do it before
+   step 1; if you change it later, run the plan and apply jobs again).
+2. Put `repository_url` into `image.repository` of `values-dev.yaml` and push.
+3. Copy `ci/backend/build-and-deploy.yml` and `ci/backend/Dockerfile.example` into the backend
+   repository and add the variables and the token secret listed in `ci/README.md`.
+4. Push to the backend repository. Check the run in its *Actions* tab and the new tag in
+   `values-dev.yaml`.
+
+**A first manual push** (before CI exists), from the backend project folder:
+
+```bash
+REPO=$(aws ecr describe-repositories --region $AWS_REGION --repository-names fullstack-app/backend-$ENV \
+  --query 'repositories[0].repositoryUri' --output text)
+aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${REPO%%/*}
+docker build -t $REPO:manual-1 . && docker push $REPO:manual-1
+```
+
+Then set `image.tag: manual-1` in `values-dev.yaml` and push to this repository.
+
+**Checks on this repository.** `.github/workflows/devops-project-ci.yml` runs on every pull
+request and push that touches `devops-project/`: `terraform fmt` and `validate` for every
+stack, `helm lint` and a schema check of the rendered chart, an Ansible syntax check of every
+playbook for both environments, and a YAML lint. It never touches AWS or the cluster.
+
 ## Day-2 operations
 
-**Release a new backend version.** Build and push the image, set the new tag in
-`helm/spring-boot-backend/values-dev.yaml`, then push. Argo CD syncs within about 3 minutes
-(or press *Refresh* then *Sync* in the UI). Later, CI will make this commit for you.
+**Release a new backend version.** Push to the backend repository's `main`: CI builds the image
+and commits the new tag to `values-dev.yaml` (step 7). Argo CD syncs within about 3 minutes
+(or press *Refresh* then *Sync* in the UI). To release by hand, push an image and set the tag
+in `values-dev.yaml` yourself.
 
 **Roll back.** `git revert <commit> && git push origin main`. (The UI's *Rollback* button is
 disabled while auto-sync is on, and git stays the source of truth.)
@@ -530,6 +580,9 @@ eksctl delete iamserviceaccount --cluster $CLUSTER --region $AWS_REGION \
 ansible-playbook -i ansible/inventories/$ENV ansible/playbooks/99-destroy-infrastructure.yml -e destroy_confirmation=$ENV
 ```
 
+The `ecr` stack is destroyed with the others. In `dev` it has `force_delete: true`, so the
+repository goes even if it still holds images; `prod` keeps `false`, so empty it first.
+
 The IAM policies you created by hand (`AWSLoadBalancerControllerIAMPolicy`,
 `ExternalSecretsDbRead-<env>`) stay until you delete them with `aws iam delete-policy`.
 What happens to the database is set per environment: `dev` has no final snapshot and no
@@ -555,7 +608,13 @@ then destroy.
 | `backend-dev` shows "resource ... is not permitted in project ecommerce" | A new kind was added to the chart. Add it to `namespaceResourceWhitelist` in `argocd/apps/project-ecommerce.yaml`. |
 | Sync error mentioning `ExternalSecret` / unknown kind | `externalSecret.enabled` is true but External Secrets Operator is not installed (step 4A). |
 | Pods `CreateContainerConfigError`, secret `backend-db` not found | Step 4 not done, or the ExternalSecret is not ready: `kubectl -n ecommerce describe externalsecret`. |
-| Pods `ImagePullBackOff` | Wrong `image.repository` / `image.tag`, or a private image without a pull secret. |
+| Pods `ImagePullBackOff` | Wrong `image.repository` / `image.tag` (does that tag exist in ECR?), or the repository is in another account/registry. For ECR also check the node role has `AmazonEC2ContainerRegistryReadOnly` (command in `ci/README.md`). |
+| CI step "Configure AWS credentials" fails with "Not authorized to perform sts:AssumeRoleWithWebIdentity" | `github_oidc_subjects` in `ecr.yml` does not match the repository/branch running the workflow (it must read `repo:<owner>/<repo>:ref:refs/heads/main`), or the `ecr` stack was not applied after you changed it. |
+| CI push fails with "tag invalid: The image tag ... already exists" | The ECR repository is immutable and that commit was already pushed. Re-run only the later jobs, or push a new commit. |
+| CI cannot push to this repository ("Permission denied", protected branch) | `GITOPS_TOKEN` lacks *Contents: read and write* on this repository, or `main` is protected against it. |
+| `ecr` plan fails with "no matching IAM OpenID Connect Provider" | `create_github_oidc_provider: false` but the account has none yet. Set it to `true` (only one environment per account should). |
+| Creating the OIDC provider fails with "EntityAlreadyExists" | The account already has one: set `create_github_oidc_provider: false`. |
+| `devops-project checks` fails at `terraform fmt` | Run `terraform fmt -recursive terraform/` and commit the result. |
 | Pods crash-looping | `kubectl -n ecommerce logs <pod>`: usually a wrong DB host, a stale password or a missing Actuator dependency. |
 | Ingress has no address | `kubectl -n kube-system logs deploy/aws-load-balancer-controller` (IAM/service account, or subnet tags). |
 | ALB targets unhealthy | Pod not ready (`kubectl describe pod`), or the health-check path (`/actuator/health/readiness`) does not exist. |
@@ -589,6 +648,15 @@ then destroy.
   runs. Both jobs use the project's current revision, so do not push between approval and apply.
 - **Ordering lives in the playbook.** `vars/stacks.yml` holds the order and the playbook loops
   over it, so the operator never lists stacks.
+- **ECR rather than Docker Hub.** The nodes already authenticate to ECR with their IAM role, so
+  there is no pull secret to create or rotate, private repositories are free, and there is no
+  anonymous pull rate limit (dev's single NAT gateway makes all nodes look like one client to
+  Docker Hub). Tags are immutable, images are scanned on push, and old images expire by a
+  lifecycle rule. CI authenticates with OIDC instead of stored keys, and the role may only push
+  to this one repository.
+- **CI commits the image tag to git.** The tag in `values-dev.yaml` is the single record of what
+  runs in dev, so a rollback is a `git revert`. CI only writes to the devops repository with a
+  token limited to it; AWS access is never shared between the repositories.
 - **No password in the repo.** RDS generates and rotates the master password and keeps it in
   Secrets Manager. It reaches the pods through a Kubernetes Secret (External Secrets
   Operator), never through git or Terraform variables.
@@ -604,9 +672,8 @@ then destroy.
 
 ## What's next
 
-1. **GitHub Actions CI:** build and test the backend, push the image, then commit the new
-   `image.tag` to `values-dev.yaml` so Argo CD deploys it; build and deploy the frontend to
-   S3 + CloudFront; run `terraform plan` on pull requests.
+1. **Frontend CI:** build the React app and deploy it to S3 + CloudFront from GitHub Actions
+   (same OIDC pattern as the backend, with a role limited to the bucket and distribution).
 2. **Monitoring:** Prometheus and Grafana (for example `kube-prometheus-stack`, deployed as
    another Argo CD application), with Spring Boot metrics from Actuator.
 3. **HTTPS and a domain:** a Route 53 record and an ACM certificate for the ALB (annotations

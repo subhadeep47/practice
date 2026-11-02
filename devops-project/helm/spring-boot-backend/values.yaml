@@ -5,7 +5,7 @@ replicaCount: 1
 
 image:
   # TODO: replace with your registry/repo for the backend image
-  repository: your-dockerhub-username/spring-boot-backend
+  repository: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/fullstack-app/backend-dev # set per environment
   pullPolicy: IfNotPresent
   # Empty = use the chart appVersion. CI should set an immutable tag (e.g. the git SHA), never "latest".
   tag: ""

@@ -1,0 +1,20 @@
+# Example Dockerfile for the Spring Boot backend (put it in the backend repository root).
+# It matches what the Helm chart expects: non-root user 1000, port 8080, read-only root
+# filesystem (the chart mounts an emptyDir on /tmp).
+
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /src
+COPY pom.xml .
+RUN mvn -B -q dependency:go-offline
+COPY src ./src
+RUN mvn -B -q package -DskipTests
+
+FROM eclipse-temurin:21-jre
+RUN useradd --uid 1000 --no-create-home app
+WORKDIR /app
+# Spring Boot's repackaged jar. If the build also leaves a *.jar.original or plain jar in
+# target/, name the file explicitly instead of using a wildcard.
+COPY --from=build /src/target/*.jar app.jar
+USER 1000
+EXPOSE 8080
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "/app/app.jar"]

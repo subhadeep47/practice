@@ -7,3 +7,4 @@ tf_stack_order:
   - eks            # Kubernetes cluster + Argo CD
   - rds            # PostgreSQL for Spring Boot
   - s3-cloudfront  # React frontend CDN
+  - ecr            # Backend image registry + GitHub Actions push role (independent)

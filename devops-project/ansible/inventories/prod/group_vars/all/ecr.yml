@@ -1,0 +1,18 @@
+---
+# Stack: terraform/ecr
+tf_vars_ecr:
+  # ECR repository of the backend image; slashes are allowed.
+  repository_name: "{{ tf_vars_common.project }}/backend-{{ env_name }}"
+  # Tagged images kept; older ones are expired automatically.
+  keep_last_images: 30
+  # false: the repository (and its images) cannot be deleted while it holds images.
+  force_delete: false
+  # One GitHub OIDC identity provider per AWS account. true creates it; use false if it
+  # already exists in this account (for example because another environment created it).
+  # false: assumes dev already created the provider in the same AWS account. Set true if prod
+  # is a separate account.
+  create_github_oidc_provider: false
+  # Which GitHub repositories/branches may push images. REPLACE the repository name with
+  # your backend repository.
+  github_oidc_subjects:
+    - "repo:subhadeep47/spring-boot-backend:ref:refs/heads/main"
