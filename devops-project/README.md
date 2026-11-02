@@ -68,6 +68,7 @@ devops-project/
 │   │   ├── 01-provision-infrastructure.yml   run Terraform for all stacks, in order
 │   │   ├── 02-show-outputs.yml               print the outputs of all stacks
 │   │   ├── 99-destroy-infrastructure.yml     destroy all stacks, reverse order
+│   │   ├── roles -> ../roles                 symlink so AWX finds the role (see below)
 │   │   └── vars/stacks.yml                   stack order (structure, not configuration)
 │   └── roles/terraform_runner/               values -> var file, init (S3 backend), plan/apply/destroy
 ├── terraform/           structure only: variables have no defaults, there are no tfvars
@@ -81,6 +82,11 @@ devops-project/
 │   └── apps/                   AppProject + Application manifests (managed by Argo CD)
 └── k8s/external-secrets/       ClusterSecretStore applied by hand (step 4A)
 ```
+
+`ansible/playbooks/roles` is a **symlink** to `ansible/roles` (not a second copy of the role).
+Ansible finds roles in a `roles/` folder next to the playbook, and AWX starts from the
+repository root, where it does not read `devops-project/ansible.cfg` (which sets `roles_path`).
+The link makes the role found in both AWX and the command line.
 
 ## Environments and configuration
 
@@ -158,8 +164,9 @@ Provisioning is meant to run from AWX, not from a laptop. Set up once per enviro
 3. **Credentials:** an *Amazon Web Services* credential for the environment's account (its
    keys become environment variables of the job and reach Terraform), or run the job where an
    IAM role is attached.
-4. **Execution environment:** it must contain `terraform` >= 1.10. Build a custom execution
-   environment image if yours does not.
+4. **Execution environment:** it must contain `terraform` >= 1.10 and the `aws` CLI v2 (the
+   EKS stack's Helm provider calls `aws eks get-token`). Build a custom execution environment
+   image if yours does not.
 5. **Job templates** (all with *Playbook* from the project, *Inventory* `devops-dev`):
 
    | Template | Playbook | Extra variables (JSON) |
@@ -193,9 +200,12 @@ ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infra
 
 ## Prerequisites
 
-Tools on the machine you run this from: `terraform` >= 1.10, `ansible`, `aws` CLI v2,
-`kubectl`, `eksctl`, `helm`, `jq`. (`helm` is only needed for the load balancer controller
-and for local chart checks.)
+Tools on the machine you run steps 2-6 from: `aws` CLI v2, `kubectl`, `eksctl`, `helm`, `jq`.
+
+Tools for the **AWX execution environment** (or for the machine, if you run the playbooks from
+the command line): `ansible`, `terraform` >= 1.10 and the `aws` CLI v2. The `aws` CLI is
+needed there too, because the EKS stack's Helm provider uses `aws eks get-token` to reach the
+cluster.
 
 AWS: credentials for an IAM identity that can create VPC, EKS, RDS, IAM, S3, CloudFront
 and Secrets Manager resources (check with `aws sts get-caller-identity`). That same identity
@@ -236,14 +246,11 @@ It takes about 20 minutes, mostly EKS and RDS. These resources cost money while 
 notably the EKS control plane, the NAT gateway, the nodes and RDS. [Tear down](#tear-down)
 when you are not using them.
 
-**Outputs.** Run the `dev: show outputs` template (CLI: `02-show-outputs.yml`). Useful ones:
-`vpc_id`, `db_endpoint`, `db_master_secret_arn`, `cluster_name`, `s3_bucket_name`,
-`cloudfront_domain_name`, `cloudfront_distribution_id`. When run on a machine with the repo,
-the playbook also points every stack folder at that environment's state, so the
-`terraform -chdir=terraform/<stack> output -raw <name>` commands used later in this guide
-return that environment's values (run the playbook with `-i ansible/inventories/<env>` again
-whenever you switch environment). In AWX the job runs in a temporary container, so read the
-values from the job output instead.
+**Outputs.** Run the `dev: show outputs` template (CLI: `02-show-outputs.yml`) and read the job
+output. Useful ones: `vpc_id`, `db_endpoint`, `db_master_secret_arn`, `cluster_name`,
+`s3_bucket_name`, `cloudfront_domain_name`, `cloudfront_distribution_id`. Terraform runs in AWX,
+not on your machine, so the commands later in this guide read what they need straight from AWS
+with the `aws` CLI, or ask you to take a value from this job output.
 
 Do not run `terraform apply` by hand in a stack folder: it has no variable values (they come
 from Ansible), which is the point.
@@ -289,7 +296,8 @@ eksctl create iamserviceaccount \
   --override-existing-serviceaccounts --approve
 
 # The controller (chart 1.14.0 = controller v2.14.1)
-VPC_ID=$(terraform -chdir=terraform/vpc output -raw vpc_id)
+VPC_ID=$(aws ec2 describe-vpcs --region $AWS_REGION --filters Name=tag:Name,Values=app-vpc-$ENV \
+  --query 'Vpcs[0].VpcId' --output text)
 helm repo add eks https://aws.github.io/eks-charts && helm repo update eks
 helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
   -n kube-system --version 1.14.0 \
@@ -320,7 +328,8 @@ Syncs the Secret from AWS Secrets Manager and keeps it current. Same pattern as 
 account, Helm reuses it.
 
 ```bash
-SECRET_ARN=$(terraform -chdir=terraform/rds output -raw db_master_secret_arn)
+SECRET_ARN=$(aws rds describe-db-instances --region $AWS_REGION --db-instance-identifier app-postgres-$ENV \
+  --query 'DBInstances[0].MasterUserSecret.SecretArn' --output text)
 cat > /tmp/eso-policy.json <<EOF
 {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
  "Action":["secretsmanager:GetSecretValue","secretsmanager:DescribeSecret"],
@@ -358,7 +367,8 @@ does not list `v1`. Argo CD will then create the `backend-db` Secret through the
 
 ```bash
 kubectl create namespace ecommerce
-SECRET_ARN=$(terraform -chdir=terraform/rds output -raw db_master_secret_arn)
+SECRET_ARN=$(aws rds describe-db-instances --region $AWS_REGION --db-instance-identifier app-postgres-$ENV \
+  --query 'DBInstances[0].MasterUserSecret.SecretArn' --output text)
 CREDS=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text)
 kubectl -n ecommerce create secret generic backend-db \
   --from-literal=username="$(echo "$CREDS" | jq -r .username)" \
@@ -396,7 +406,7 @@ Argo CD deploys what is in git, so the environment settings go in
 |---|---|
 | `image.repository` | your backend image, e.g. `<dockerhub-user>/spring-boot-backend` |
 | `image.tag` | an immutable tag such as the git SHA (never `latest`) |
-| `database.host` | `terraform -chdir=terraform/rds output -raw db_endpoint` |
+| `database.host` | `aws rds describe-db-instances --region $AWS_REGION --db-instance-identifier app-postgres-$ENV --query 'DBInstances[0].Endpoint.Address' --output text` (or `db_endpoint` from the outputs job) |
 | `externalSecret.*` | only for step 4 option A |
 
 ```bash
@@ -456,10 +466,12 @@ which EKS does not install.
 ```bash
 cd <your React project>
 npm run build            # output folder is build/ (Create React App) or dist/ (Vite)
-aws s3 sync build/ s3://$(terraform -chdir=<path-to>/devops-project/terraform/s3-cloudfront output -raw s3_bucket_name) --delete
-aws cloudfront create-invalidation \
-  --distribution-id $(terraform -chdir=<path-to>/devops-project/terraform/s3-cloudfront output -raw cloudfront_distribution_id) \
-  --paths "/index.html"
+# bucket = <bucket_name_prefix>-<env> (s3_cloudfront.yml); the distribution id is
+# `cloudfront_distribution_id` in the "show outputs" job
+BUCKET=<bucket_name_prefix>-$ENV
+DISTRIBUTION_ID=<cloudfront_distribution_id from the outputs job>
+aws s3 sync build/ s3://$BUCKET --delete
+aws cloudfront create-invalidation --distribution-id $DISTRIBUTION_ID --paths "/index.html"
 ```
 
 The site is served at the `cloudfront_domain_name` output. The bucket is private and only
@@ -537,7 +549,6 @@ then destroy.
 | `terraform: command not found` in an AWX job | The execution environment has no Terraform >= 1.10. Use an execution environment that includes it. |
 | Terraform says "No value for required variable X" | The variable is declared in `terraform/<stack>/variables.tf` but missing from the environment's `tf_vars_<stack>` (or `tf_vars_common`) in `ansible/inventories/<env>/group_vars/all/`. |
 | Terraform warns "Value for undeclared variable" | A key in the environment's variables has no matching `variable` block in that stack; remove it or declare it. |
-| `terraform output` in a stack folder shows another environment's values | The folder is initialised for the environment used last. Run `02-show-outputs.yml` with the right `-i`. |
 | Planning `prod` complains about the state bucket | The bucket in `tf_backend` does not exist or your AWS identity cannot reach it. |
 | `kubectl` says unauthorized | You are using a different AWS identity than the one that created the cluster. Check `aws sts get-caller-identity`. |
 | `backend-dev` shows *ComparisonError* "database.host is required" | `values-dev.yaml` still has an empty `database.host`, or the change is not pushed. |
