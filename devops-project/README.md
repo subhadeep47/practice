@@ -648,6 +648,12 @@ then destroy.
   runs. Both jobs use the project's current revision, so do not push between approval and apply.
 - **Ordering lives in the playbook.** `vars/stacks.yml` holds the order and the playbook loops
   over it, so the operator never lists stacks.
+- **The node IAM role is defined here, not left to a module default.** `terraform/eks/iam.tf`
+  creates the role the worker nodes assume and attaches exactly three AWS-managed policies
+  (worker node, CNI, ECR read-only). Pods do not get these permissions for their own AWS
+  calls; those use IRSA service accounts. Changing the role of an **existing** node group makes
+  Terraform replace the node group (the pods are rescheduled), so plan this for a quiet moment;
+  on a new environment it makes no difference.
 - **ECR rather than Docker Hub.** The nodes already authenticate to ECR with their IAM role, so
   there is no pull secret to create or rotate, private repositories are free, and there is no
   anonymous pull rate limit (dev's single NAT gateway makes all nodes look like one client to

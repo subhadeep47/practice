@@ -29,6 +29,10 @@ module "eks" {
 
   eks_managed_node_groups = {
     default = {
+      # Use our own role (iam.tf) instead of letting the module create one.
+      create_iam_role = false
+      iam_role_arn    = aws_iam_role.eks_nodes.arn
+
       instance_types = var.node_instance_types
       min_size       = var.min_size
       max_size       = var.max_size
@@ -39,4 +43,7 @@ module "eks" {
   tags = {
     Environment = var.environment
   }
+
+  # The policies must be attached before nodes start, or they cannot join or pull images.
+  depends_on = [aws_iam_role_policy_attachment.eks_nodes]
 }

@@ -18,3 +18,13 @@ output "node_security_group_id" {
   value       = module.eks.node_security_group_id
   description = "Security group attached to the worker nodes (used to allow pod traffic to RDS)"
 }
+
+output "node_role_name" {
+  value       = aws_iam_role.eks_nodes.name
+  description = "IAM role of the worker nodes (it carries the ECR pull permission)"
+}
+
+output "node_role_arn" {
+  value       = aws_iam_role.eks_nodes.arn
+  description = "ARN of the worker node IAM role"
+}

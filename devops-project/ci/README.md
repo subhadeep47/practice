@@ -40,11 +40,10 @@ Validation of this repository itself (Terraform, Helm, Ansible, YAML) is
 
 ## How the nodes pull the image
 
-Nothing to configure. The EKS worker nodes pull from ECR with their node IAM role, so there is
-no image pull secret. To check on your cluster:
+Nothing to configure by hand. The worker nodes assume an IAM role defined in
+`terraform/eks/iam.tf`, which carries `AmazonEC2ContainerRegistryReadOnly`, so they pull from
+ECR without an image pull secret. To see what the role has:
 
 ```bash
-ROLE=$(aws eks describe-nodegroup --cluster-name app-cluster-dev --nodegroup-name <name> \
-  --query nodegroup.nodeRole --output text | awk -F/ '{print $NF}')
-aws iam list-attached-role-policies --role-name "$ROLE" | grep ContainerRegistryReadOnly
+aws iam list-attached-role-policies --role-name app-cluster-dev-node
 ```
