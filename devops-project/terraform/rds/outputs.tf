@@ -27,3 +27,8 @@ output "db_security_group_id" {
   value       = aws_security_group.rds.id
   description = "Security group attached to the RDS instance"
 }
+
+output "external_secrets_role_arn" {
+  value       = aws_iam_role.external_secrets.arn
+  description = "IAM role the External Secrets Operator assumes (EKS Pod Identity) to read the database secret"
+}

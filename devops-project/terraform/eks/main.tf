@@ -43,6 +43,15 @@ module "eks" {
     }
   }
 
+  # EKS Pod Identity agent: lets a pod's service account be tied to an IAM role through an
+  # aws_eks_pod_identity_association (used for External Secrets, see terraform/rds/
+  # external_secrets.tf). It runs on every node, so the module installs it after the nodes.
+  cluster_addons = {
+    eks-pod-identity-agent = {
+      most_recent = true
+    }
+  }
+
   eks_managed_node_groups = {
     default = {
       # Use our own role (iam.tf) instead of letting the module create one.
@@ -61,5 +70,8 @@ module "eks" {
   }
 
   # The policies must be attached before nodes start, or they cannot join or pull images.
-  depends_on = [aws_iam_role_policy_attachment.eks_nodes]
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_nodes,
+    aws_iam_role_policy.pod_identity_agent,
+  ]
 }

@@ -20,16 +20,17 @@ folder only holds infrastructure and delivery.
 4. [Prerequisites](#prerequisites)
 5. [Step 1 - Provision the infrastructure](#step-1---provision-the-infrastructure)
 6. [Step 2 - Connect to the cluster](#step-2---connect-to-the-cluster)
-7. [Step 3 - AWS Load Balancer Controller](#step-3---aws-load-balancer-controller)
-8. [Step 4 - Database credentials](#step-4---database-credentials)
-9. [Step 5 - Bootstrap Argo CD and deploy the backend](#step-5---bootstrap-argo-cd-and-deploy-the-backend)
-10. [Step 6 - Deploy the frontend](#step-6---deploy-the-frontend)
-11. [Step 7 - Continuous integration](#step-7---continuous-integration)
-12. [Day-2 operations](#day-2-operations)
-13. [Tear down](#tear-down)
-14. [Troubleshooting](#troubleshooting)
-15. [Design decisions](#design-decisions)
-16. [What's next](#whats-next)
+7. [How pods get AWS permissions](#how-pods-get-aws-permissions)
+8. [Step 3 - AWS Load Balancer Controller](#step-3---aws-load-balancer-controller)
+9. [Step 4 - Database credentials](#step-4---database-credentials)
+10. [Step 5 - Bootstrap Argo CD and deploy the backend](#step-5---bootstrap-argo-cd-and-deploy-the-backend)
+11. [Step 6 - Deploy the frontend](#step-6---deploy-the-frontend)
+12. [Step 7 - Continuous integration](#step-7---continuous-integration)
+13. [Day-2 operations](#day-2-operations)
+14. [Tear down](#tear-down)
+15. [Troubleshooting](#troubleshooting)
+16. [Design decisions](#design-decisions)
+17. [What's next](#whats-next)
 
 ## Architecture
 
@@ -208,7 +209,7 @@ ansible-playbook -i ansible/inventories/dev ansible/playbooks/01-provision-infra
 
 ## Prerequisites
 
-Tools on the machine you run steps 2-6 from: `aws` CLI v2, `kubectl`, `eksctl`, `helm`, `jq`.
+Tools on the machine you run steps 2-6 from: `aws` CLI v2, `kubectl`, `eksctl` (step 3 only), `helm`, `jq`.
 
 Tools for the **AWX execution environment** (or for the machine, if you run the playbooks from
 the command line): `ansible`, `terraform` >= 1.10 and the `aws` CLI v2. The `aws` CLI is
@@ -286,13 +287,44 @@ Keep these variables in your shell for the next steps. If you set `AWS_PROFILE` 
 environment's `tf_process_env`, export the same profile in your shell for `aws`, `eksctl` and
 `kubectl`.
 
+## How pods get AWS permissions
+
+Connecting to the database needs no AWS permission: pods open a normal TCP connection to RDS
+(allowed by the security group) and log in with the user name and password from the
+`backend-db` Secret. IAM roles matter only for things that call the **AWS API**:
+
+| Who calls AWS | For | Identity | How it is set up |
+|---|---|---|---|
+| Worker nodes (kubelet) | pull images from ECR, pod networking | node IAM role | Terraform, `terraform/eks/iam.tf` |
+| AWS Load Balancer Controller pod | create the ALB | its own role, **IRSA** | `eksctl`, by hand (step 3) |
+| External Secrets Operator pod | read the database secret | its own role, **EKS Pod Identity** | **Terraform**, `terraform/rds/external_secrets.tf` (step 4A only installs the operator) |
+| Spring Boot pods, Argo CD | nothing in AWS | none | |
+| AWX running Terraform | create the infrastructure | the AWX AWS credential | AWX |
+| GitHub Actions | push images to ECR | OIDC role | Terraform, `terraform/ecr` |
+
+Two ways to give a pod its own role are used on purpose, one of each:
+
+- **IRSA** (load balancer controller): `eksctl create iamserviceaccount` creates an IAM role that
+  trusts the cluster's OIDC provider for one service account, and a Kubernetes service account
+  annotated with the role's ARN. EKS gives pods that use the account a token that AWS exchanges
+  for temporary credentials.
+- **EKS Pod Identity** (External Secrets Operator): the `eks-pod-identity-agent` add-on (installed
+  by the EKS stack) runs on every node, and a Terraform `aws_eks_pod_identity_association` says
+  "service account `external-secrets/external-secrets` of this cluster gets this role". The
+  service account needs no annotation and the role needs no OIDC trust.
+
+Pods can often reach the credentials of the node they run on, which is why the node role is kept
+minimal and anything pod-specific gets a role of its own.
+
 ## Step 3 - AWS Load Balancer Controller
 
 Manual, once per cluster. It turns the chart's Ingress into an ALB. The controller needs an
-IAM role: `eksctl create iamserviceaccount` creates the role **and** the annotated
-Kubernetes service account together (IRSA), and the Helm chart then reuses that account
-(`serviceAccount.create=false`). There is deliberately no ServiceAccount manifest for it in
-this repo: the role ARN is account-specific and `eksctl` owns the account.
+IAM role, set up here the **IRSA** way (see "How pods get AWS permissions"):
+`eksctl create iamserviceaccount` creates the role **and** the annotated Kubernetes service
+account together, and the Helm chart then reuses that account (`serviceAccount.create=false`).
+There is deliberately no ServiceAccount manifest for it in this repo: the role ARN is
+account-specific and `eksctl` owns the account. (The External Secrets role in step 4A is
+different: Terraform creates it.)
 
 ```bash
 # OIDC provider for IRSA (the EKS module creates it; this is a safe no-op if it exists)
@@ -337,40 +369,43 @@ to create it.
 
 ### Option A - External Secrets Operator (recommended)
 
-Syncs the Secret from AWS Secrets Manager and keeps it current. Same pattern as step 3:
-`eksctl` creates an IAM role (allowed to read **only** the database secret) and a service
-account, Helm reuses it.
+Syncs the Secret from AWS Secrets Manager and keeps it current. The operator's permission to
+read the database secret (and only that secret) is already in place: step 1 created the IAM role
+`app-cluster-<env>-external-secrets` and attached it, through **EKS Pod Identity**, to the service
+account `external-secrets` in the namespace `external-secrets`
+(`terraform/rds/external_secrets.tf`). So there is nothing to create in IAM here: install the
+operator with exactly that service account name and apply the store.
 
 ```bash
 SECRET_ARN=$(aws rds describe-db-instances --region $AWS_REGION --db-instance-identifier app-postgres-$ENV \
   --query 'DBInstances[0].MasterUserSecret.SecretArn' --output text)
-cat > /tmp/eso-policy.json <<EOF
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow",
- "Action":["secretsmanager:GetSecretValue","secretsmanager:DescribeSecret"],
- "Resource":"${SECRET_ARN}"}]}
-EOF
-aws iam create-policy --policy-name ExternalSecretsDbRead-${ENV} --policy-document file:///tmp/eso-policy.json
 
-kubectl create namespace external-secrets
-eksctl create iamserviceaccount \
-  --cluster $CLUSTER --region $AWS_REGION \
-  --namespace external-secrets --name external-secrets \
-  --attach-policy-arn arn:aws:iam::${ACCOUNT_ID}:policy/ExternalSecretsDbRead-${ENV} \
-  --override-existing-serviceaccounts --approve
+# Check what step 1 created (the association must exist before the operator starts)
+aws eks list-pod-identity-associations --cluster-name $CLUSTER --region $AWS_REGION
+kubectl -n kube-system get daemonset eks-pod-identity-agent       # the agent runs on every node
 
 helm repo add external-secrets https://charts.external-secrets.io && helm repo update external-secrets
 helm search repo external-secrets/external-secrets      # pick a current version and pin it below
-helm install external-secrets external-secrets/external-secrets -n external-secrets \
+helm install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace \
   --version <chart-version> \
-  --set serviceAccount.create=false --set serviceAccount.name=external-secrets
+  --set serviceAccount.create=true --set serviceAccount.name=external-secrets
 kubectl -n external-secrets rollout status deploy/external-secrets
+
+# Confirm Pod Identity reached the pod (the agent adds AWS_CONTAINER_* variables)
+kubectl -n external-secrets get pod -o yaml | grep AWS_CONTAINER_CREDENTIALS_FULL_URI
 
 # Which API version does this operator serve? The chart defaults to external-secrets.io/v1.
 kubectl get crd externalsecrets.external-secrets.io -o jsonpath='{.spec.versions[*].name}'
 
-# Tell the operator how to reach Secrets Manager (region is set inside the file)
+# Tell the operator how to reach Secrets Manager (region is set inside the file; there is no
+# login section because the operator uses its own pod identity)
 kubectl apply -f k8s/external-secrets/cluster-secret-store.yaml
 ```
+
+The service account name and namespace must stay `external-secrets` / `external-secrets`: they are
+what the Terraform association names. If you install the operator elsewhere, change
+`external_secrets_namespace` / `external_secrets_service_account` in
+`terraform/rds/external_secrets.tf` and apply.
 
 Then, in `helm/spring-boot-backend/values-dev.yaml` (step 5 edits this file anyway):
 `externalSecret.enabled: true` and `externalSecret.remoteSecretId: <the $SECRET_ARN value>`.
@@ -573,10 +608,8 @@ aws elbv2 describe-load-balancers --query 'LoadBalancers[].LoadBalancerName'   #
 helm -n kube-system uninstall aws-load-balancer-controller
 eksctl delete iamserviceaccount --cluster $CLUSTER --region $AWS_REGION \
   --namespace kube-system --name aws-load-balancer-controller
-# only if you did step 4A:
+# only if you did step 4A (its IAM role belongs to Terraform and goes with the rds stack):
 helm -n external-secrets uninstall external-secrets
-eksctl delete iamserviceaccount --cluster $CLUSTER --region $AWS_REGION \
-  --namespace external-secrets --name external-secrets
 
 # 3. Destroy the infrastructure. In AWX run `dev: destroy` and type the environment name in the
 #    survey. CLI equivalent:
@@ -586,8 +619,8 @@ ansible-playbook -i ansible/inventories/$ENV ansible/playbooks/99-destroy-infras
 The `ecr` stack is destroyed with the others. In `dev` it has `force_delete: true`, so the
 repository goes even if it still holds images; `prod` keeps `false`, so empty it first.
 
-The IAM policies you created by hand (`AWSLoadBalancerControllerIAMPolicy`,
-`ExternalSecretsDbRead-<env>`) stay until you delete them with `aws iam delete-policy`.
+The IAM policy you created by hand (`AWSLoadBalancerControllerIAMPolicy`) stays until you
+delete it with `aws iam delete-policy`.
 What happens to the database is set per environment: `dev` has no final snapshot and no
 deletion protection, so it is deleted at once; `prod` takes a final snapshot and has deletion
 protection, so first set `deletion_protection: false` in `prod`'s `rds.yml`, apply, and only
@@ -610,6 +643,8 @@ then destroy.
 | `backend-dev` shows *ComparisonError* "database.host is required" | `values-dev.yaml` still has an empty `database.host`, or the change is not pushed. |
 | `backend-dev` shows "resource ... is not permitted in project ecommerce" | A new kind was added to the chart. Add it to `namespaceResourceWhitelist` in `argocd/apps/project-ecommerce.yaml`. |
 | Sync error mentioning `ExternalSecret` / unknown kind | `externalSecret.enabled` is true but External Secrets Operator is not installed (step 4A). |
+| `ExternalSecret` shows "AccessDenied" or "no EC2 IMDS role found" / "failed to retrieve credentials" | The operator pod has no Pod Identity credentials. Check `aws eks list-pod-identity-associations --cluster-name $CLUSTER` lists `external-secrets/external-secrets`, that the `eks-pod-identity-agent` daemonset is running, and that the service account is named `external-secrets`. If the association was created after the operator started, restart it: `kubectl -n external-secrets rollout restart deploy`. |
+| `rds` plan fails with "couldn't find resource" for the EKS cluster | The `eks` stack is not applied yet (the External Secrets role looks the cluster up by name). |
 | Pods `CreateContainerConfigError`, secret `backend-db` not found | Step 4 not done, or the ExternalSecret is not ready: `kubectl -n ecommerce describe externalsecret`. |
 | Pods `ImagePullBackOff` | Wrong `image.repository` / `image.tag` (does that tag exist in ECR?), or the repository is in another account/registry. For ECR also check the node role has `AmazonEC2ContainerRegistryReadOnly` (command in `ci/README.md`). |
 | CI step "Configure AWS credentials" fails with "Not authorized to perform sts:AssumeRoleWithWebIdentity" | `github_oidc_subjects` in `ecr.yml` does not match the repository/branch running the workflow (it must read `repo:<owner>/<repo>:ref:refs/heads/main`), or the `ecr` stack was not applied after you changed it. |
@@ -654,7 +689,7 @@ then destroy.
 - **The node IAM role is defined here, not left to a module default.** `terraform/eks/iam.tf`
   creates the role the worker nodes assume and attaches exactly three AWS-managed policies
   (worker node, CNI, ECR read-only). Pods do not get these permissions for their own AWS
-  calls; those use IRSA service accounts. Changing the role of an **existing** node group makes
+  calls; those use roles of their own (IRSA or Pod Identity). Changing the role of an **existing** node group makes
   Terraform replace the node group (the pods are rescheduled), so plan this for a quiet moment;
   on a new environment it makes no difference.
 - **ECR rather than Docker Hub.** The nodes already authenticate to ECR with their IAM role, so
@@ -672,9 +707,15 @@ then destroy.
 - **Least-privilege network.** RDS accepts connections only from the EKS node security
   group. The Argo CD UI is a ClusterIP service reached by port-forward, and Actuator is not
   routed through the ALB.
+- **Two ways of giving a pod an IAM role, on purpose.** The External Secrets role is plain
+  Terraform (EKS Pod Identity): it sits next to the secret it may read, is reviewed like any
+  other code, and needs no OIDC provider, annotation or manual `eksctl` step. The load balancer
+  controller keeps the manual IRSA route (`eksctl create iamserviceaccount`), which shows the
+  other mechanism and keeps its large AWS-published policy out of this repository. Either can
+  be moved to the other method later.
 - **Add-ons by hand, workloads by Argo CD.** The load balancer controller and External
-  Secrets Operator need account-specific IAM roles, so they are a one-time manual step.
-  Everything application-related is deployed by Argo CD from git.
+  Secrets Operator are one-time Helm installs per cluster. Everything application-related is
+  deployed by Argo CD from git.
 - **Argo CD itself is managed by Terraform**, which avoids Argo CD managing its own
   installation. Upgrade it through `argocd_chart_version` in the environment's `eks.yml`.
 - **Backend is public over HTTP for now.** The ALB serves plain HTTP on its own DNS name.
