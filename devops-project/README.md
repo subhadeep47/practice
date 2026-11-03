@@ -78,7 +78,7 @@ devops-project/
 ├── terraform/           structure only: variables have no defaults, there are no tfvars
 │   ├── vpc/             VPC, subnets, NAT                    (apply 1st)
 │   ├── eks/             EKS cluster + Argo CD (Helm)         (apply 2nd)
-│   ├── rds/             PostgreSQL + security group          (apply 3rd)
+│   ├── rds/             PostgreSQL, security group, External Secrets role (apply 3rd)
 │   ├── s3-cloudfront/   React hosting                        (independent)
 │   └── ecr/             backend image registry + GitHub push role (independent)
 ├── helm/spring-boot-backend/   chart; values-dev.yaml = desired state of dev
