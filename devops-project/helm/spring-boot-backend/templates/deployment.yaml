@@ -4,6 +4,12 @@ metadata:
   name: {{ include "spring-boot-backend.fullname" . }}
   labels:
     {{- include "spring-boot-backend.labels" . | nindent 4 }}
+  {{- if .Values.reloader.enabled }}
+  annotations:
+    # Stakater Reloader (README step 4A) restarts the pods when the DB Secret changes, so a
+    # rotated password reaches the running app. Environment variables are fixed at pod start.
+    reloader.stakater.com/auto: "true"
+  {{- end }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}

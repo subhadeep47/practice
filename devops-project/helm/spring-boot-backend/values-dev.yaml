@@ -26,6 +26,11 @@ database:
   # ExternalSecret below (step 4A).
   existingSecret: backend-db
 
+reloader:
+  # Roll the pods when the DB Secret changes, e.g. after the 7-day password rotation
+  # (needs Stakater Reloader, README step 4A).
+  enabled: true
+
 externalSecret:
   # true after External Secrets Operator is installed (README step 4A).
   enabled: false

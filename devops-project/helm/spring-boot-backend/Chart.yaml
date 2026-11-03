@@ -4,7 +4,7 @@ description: Helm chart for the Spring Boot e-commerce backend (RDS PostgreSQL)
 type: application
 
 # Chart version: bump on every change to the chart or its templates (SemVer).
-version: 0.2.0
+version: 0.3.0
 
 # Default image tag when image.tag is empty. CI / Argo CD normally set image.tag explicitly.
 appVersion: "1.0.0"

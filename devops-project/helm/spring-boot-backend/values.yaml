@@ -165,6 +165,12 @@ database:
     username: username
     password: password
 
+# Restart the pods when the database Secret changes (needs Stakater Reloader installed in the
+# cluster, README step 4A). Without it a rotated password only reaches pods that restart.
+# Harmless when Reloader is absent: the annotation is then ignored.
+reloader:
+  enabled: false
+
 # Optional: sync the RDS-managed master credentials from AWS Secrets Manager into the
 # cluster using External Secrets Operator (must be installed, with a SecretStore configured).
 externalSecret:

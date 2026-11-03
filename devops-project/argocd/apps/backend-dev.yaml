@@ -38,9 +38,13 @@ spec:
         duration: 30s
         factor: 2
         maxDuration: 5m
-  # If you enable autoscaling in values-dev.yaml, let the HPA own the replica count:
-  # ignoreDifferences:
-  #   - group: apps
-  #     kind: Deployment
-  #     jsonPointers:
-  #       - /spec/replicas
+  # Stakater Reloader (README step 4A) stamps this annotation on the pod template when it rolls
+  # the pods after a Secret change. It is not in git, so without this Argo CD would show the
+  # app OutOfSync and self-heal would revert it.
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/metadata/annotations/reloader.stakater.com~1last-reloaded-from
+  # If you enable autoscaling in values-dev.yaml, let the HPA own the replica count too: add
+  # /spec/replicas to the jsonPointers above.

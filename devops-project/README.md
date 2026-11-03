@@ -365,7 +365,9 @@ The backend reads the database username and password from a Kubernetes Secret na
 to create it.
 
 > RDS-managed master passwords **rotate automatically (every 7 days)**. Option B does not
-> follow the rotation, so use option A for anything that stays up.
+> follow the rotation, so use option A for anything that stays up. Option A also needs
+> Reloader (4A below): the Secret is kept current, but a running pod reads its environment
+> variables only once, at start, so something has to restart the pods after a rotation.
 
 ### Option A - External Secrets Operator (recommended)
 
@@ -401,6 +403,29 @@ kubectl get crd externalsecrets.external-secrets.io -o jsonpath='{.spec.versions
 # login section because the operator uses its own pod identity)
 kubectl apply -f k8s/external-secrets/cluster-secret-store.yaml
 ```
+
+**Restart the pods when the password changes (Stakater Reloader).** Install it once per
+cluster. It watches the Secrets that a Deployment uses and rolls the pods when one changes,
+so a rotated password reaches the running app. With Argo CD it must use the `annotations`
+strategy (the default would add an environment variable to the Deployment that Argo CD
+reports as drift):
+
+```bash
+helm repo add stakater https://stakater.github.io/stakater-charts && helm repo update stakater
+helm search repo stakater/reloader                      # pick a current version and pin it below
+helm install reloader stakater/reloader -n reloader --create-namespace \
+  --version <chart-version> --set reloader.reloadStrategy=annotations
+kubectl -n reloader rollout status deploy -l app.kubernetes.io/name=reloader
+```
+
+The chart switches it on with `reloader.enabled: true` in `values-dev.yaml`, which puts the
+annotation `reloader.stakater.com/auto: "true"` on the backend Deployment. Reloader stamps
+`reloader.stakater.com/last-reloaded-from` on the pod template when it rolls the pods, so
+`argocd/apps/backend-dev.yaml` tells Argo CD to ignore that one annotation.
+To test it: force a refresh with `kubectl -n ecommerce annotate externalsecret backend-db force-sync=$(date +%s) --overwrite`
+after changing the secret value, or just rotate it
+(`aws secretsmanager rotate-secret --secret-id $SECRET_ARN`), and watch
+`kubectl -n ecommerce get pods -w`.
 
 The service account name and namespace must stay `external-secrets` / `external-secrets`: they are
 what the Terraform association names. If you install the operator elsewhere, change
@@ -610,6 +635,7 @@ eksctl delete iamserviceaccount --cluster $CLUSTER --region $AWS_REGION \
   --namespace kube-system --name aws-load-balancer-controller
 # only if you did step 4A (its IAM role belongs to Terraform and goes with the rds stack):
 helm -n external-secrets uninstall external-secrets
+helm -n reloader uninstall reloader
 
 # 3. Destroy the infrastructure. In AWX run `dev: destroy` and type the environment name in the
 #    survey. CLI equivalent:
@@ -645,6 +671,8 @@ then destroy.
 | Sync error mentioning `ExternalSecret` / unknown kind | `externalSecret.enabled` is true but External Secrets Operator is not installed (step 4A). |
 | `ExternalSecret` shows "AccessDenied" or "no EC2 IMDS role found" / "failed to retrieve credentials" | The operator pod has no Pod Identity credentials. Check `aws eks list-pod-identity-associations --cluster-name $CLUSTER` lists `external-secrets/external-secrets`, that the `eks-pod-identity-agent` daemonset is running, and that the service account is named `external-secrets`. If the association was created after the operator started, restart it: `kubectl -n external-secrets rollout restart deploy`. |
 | `rds` plan fails with "couldn't find resource" for the EKS cluster | The `eks` stack is not applied yet (the External Secrets role looks the cluster up by name). |
+| Backend pods log "password authentication failed" some days after deploy | The 7-day rotation changed the password and the pods still hold the old one. Check Reloader is installed (`kubectl -n reloader get pods`), `reloader.enabled: true` in the values, and that Reloader uses the `annotations` strategy. Quick fix: `kubectl -n ecommerce rollout restart deploy/backend-spring-boot-backend`. |
+| `backend-dev` is OutOfSync because of `reloader.stakater.com/last-reloaded-from` | The `ignoreDifferences` block in `argocd/apps/backend-dev.yaml` is missing, or Reloader runs with the default `env-vars` strategy (reinstall with `--set reloader.reloadStrategy=annotations`). |
 | Pods `CreateContainerConfigError`, secret `backend-db` not found | Step 4 not done, or the ExternalSecret is not ready: `kubectl -n ecommerce describe externalsecret`. |
 | Pods `ImagePullBackOff` | Wrong `image.repository` / `image.tag` (does that tag exist in ECR?), or the repository is in another account/registry. For ECR also check the node role has `AmazonEC2ContainerRegistryReadOnly` (command in `ci/README.md`). |
 | CI step "Configure AWS credentials" fails with "Not authorized to perform sts:AssumeRoleWithWebIdentity" | `github_oidc_subjects` in `ecr.yml` does not match the repository/branch running the workflow (it must read `repo:<owner>/<repo>:ref:refs/heads/main`), or the `ecr` stack was not applied after you changed it. |
@@ -701,6 +729,11 @@ then destroy.
 - **CI commits the image tag to git.** The tag in `values-dev.yaml` is the single record of what
   runs in dev, so a rollback is a `git revert`. CI only writes to the devops repository with a
   token limited to it; AWS access is never shared between the repositories.
+- **A rotated password restarts the pods.** RDS rotates the master password every 7 days and
+  the External Secrets Operator copies it into the Kubernetes Secret, but a container reads
+  its environment variables only when it starts. Stakater Reloader rolls the pods when the
+  Secret changes (one annotation on the Deployment). It uses the `annotations` strategy and
+  the Application ignores that one annotation, so Argo CD's self-heal does not fight it.
 - **No password in the repo.** RDS generates and rotates the master password and keeps it in
   Secrets Manager. It reaches the pods through a Kubernetes Secret (External Secrets
   Operator), never through git or Terraform variables.
