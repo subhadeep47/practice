@@ -216,8 +216,10 @@ needed there too, because the EKS stack's Helm provider uses `aws eks get-token`
 cluster.
 
 AWS: credentials for an IAM identity that can create VPC, EKS, RDS, IAM, S3, CloudFront
-and Secrets Manager resources (check with `aws sts get-caller-identity`). That same identity
-becomes the EKS cluster admin, so use the same one for `kubectl` later.
+and Secrets Manager resources (check with `aws sts get-caller-identity`). The identity that
+runs Terraform (the AWX credential) becomes cluster admin automatically. **Your own IAM user or
+SSO role does not**, so list it in `cluster_admin_principal_arns` in the environment's `eks.yml`
+before step 1 (otherwise `kubectl` says "unauthorized" in step 2).
 
 **Terraform state bucket.** State is stored in the S3 bucket `subhadeep-terraform-state-bucket`
 (eu-north-1), created by the `remote-backend-terraform/` folder at the repository root.
@@ -232,6 +234,7 @@ Consider turning on versioning for the bucket.
 | Globally unique frontend bucket name | `ansible/inventories/<env>/group_vars/all/s3_cloudfront.yml` (`bucket_name_prefix`) |
 | State bucket, region, sizes, CIDRs, anything else per environment | the other files in `ansible/inventories/<env>/group_vars/all/` |
 | Your backend repository name (who may push images) | `ansible/inventories/<env>/group_vars/all/ecr.yml` (`github_oidc_subjects`) |
+| Who may use `kubectl` (your IAM user/role ARN) | `ansible/inventories/<env>/group_vars/all/eks.yml` (`cluster_admin_principal_arns`) |
 | Backend image, DB host, secret settings | `helm/spring-boot-backend/values-dev.yaml` (step 5) |
 
 Everything below is run from the `devops-project` folder.
@@ -603,7 +606,7 @@ then destroy.
 | Terraform says "No value for required variable X" | The variable is declared in `terraform/<stack>/variables.tf` but missing from the environment's `tf_vars_<stack>` (or `tf_vars_common`) in `ansible/inventories/<env>/group_vars/all/`. |
 | Terraform warns "Value for undeclared variable" | A key in the environment's variables has no matching `variable` block in that stack; remove it or declare it. |
 | Planning `prod` complains about the state bucket | The bucket in `tf_backend` does not exist or your AWS identity cannot reach it. |
-| `kubectl` says unauthorized | You are using a different AWS identity than the one that created the cluster. Check `aws sts get-caller-identity`. |
+| `kubectl` says unauthorized | Your AWS identity is not an admin of the cluster. Check `aws sts get-caller-identity`, add that ARN to `cluster_admin_principal_arns` in the environment's `eks.yml`, and run the plan and apply jobs again. |
 | `backend-dev` shows *ComparisonError* "database.host is required" | `values-dev.yaml` still has an empty `database.host`, or the change is not pushed. |
 | `backend-dev` shows "resource ... is not permitted in project ecommerce" | A new kind was added to the chart. Add it to `namespaceResourceWhitelist` in `argocd/apps/project-ecommerce.yaml`. |
 | Sync error mentioning `ExternalSecret` / unknown kind | `externalSecret.enabled` is true but External Secrets Operator is not installed (step 4A). |

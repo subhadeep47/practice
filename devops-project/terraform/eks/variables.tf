@@ -46,6 +46,11 @@ variable "min_size" {
   description = "Minimum node count"
 }
 
+variable "cluster_admin_principal_arns" {
+  type        = list(string)
+  description = "IAM users or roles (ARNs) that get cluster-admin access with kubectl, in addition to the identity that runs Terraform. Use [] for none."
+}
+
 variable "argocd_chart_version" {
   type        = string
   description = "argo-cd Helm chart version"

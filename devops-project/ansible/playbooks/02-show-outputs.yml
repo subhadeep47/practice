@@ -1,10 +1,8 @@
 ---
-# Print the Terraform outputs of every stack for ONE environment (read-only).
-# It also points each stack folder at this environment's state, so afterwards
-#   terraform -chdir=terraform/<stack> output -raw <name>
-# works for this environment. Run it whenever you switch environments.
+# Print the Terraform outputs of every stack for ONE environment (read-only). In AWX the values
+# are in the job output; read them from there (the job container is thrown away afterwards).
 #
-#   ansible-playbook -i ansible/inventories/dev ansible/playbooks/02-show-outputs.yml
+# CLI: ansible-playbook -i ansible/inventories/dev ansible/playbooks/02-show-outputs.yml
 - name: Show Terraform outputs
   hosts: localhost
   connection: local

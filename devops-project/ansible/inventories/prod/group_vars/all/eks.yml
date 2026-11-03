@@ -5,6 +5,11 @@ tf_vars_eks:
   # The API stays IAM-authenticated, but consider false (private) once pipelines run inside
   # the VPC or you have a VPN/bastion.
   cluster_endpoint_public_access: true
+  # Who may use kubectl, besides the identity that runs Terraform (AWX), which is admin
+  # automatically. ADD YOUR OWN IAM user or SSO role here, e.g.
+  #   - arn:aws:iam::123456789012:user/subhadeep
+  # (find yours with `aws sts get-caller-identity`). Do not list the AWX identity again.
+  cluster_admin_principal_arns: []
   node_instance_types: ["t3.large"]
   desired_size: 3
   min_size: 2

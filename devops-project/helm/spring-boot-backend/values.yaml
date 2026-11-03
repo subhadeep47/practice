@@ -4,8 +4,8 @@
 replicaCount: 1
 
 image:
-  # TODO: replace with your registry/repo for the backend image
-  repository: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/fullstack-app/backend-dev # set per environment
+  # Set per environment in values-<env>.yaml (the ECR repository URL, no tag).
+  repository: REPLACE_IN_VALUES_FILE
   pullPolicy: IfNotPresent
   # Empty = use the chart appVersion. CI should set an immutable tag (e.g. the git SHA), never "latest".
   tag: ""

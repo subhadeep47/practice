@@ -19,7 +19,7 @@ image:
   tag: ""
 
 database:
-  # terraform -chdir=terraform/rds output -raw db_endpoint
+  # `db_endpoint` from the outputs job, or see README step 5.2 for the aws CLI command.
   host: ""
   name: appdb
   # Secret with keys username/password. Created by hand (README step 4B) or by the
@@ -29,7 +29,7 @@ database:
 externalSecret:
   # true after External Secrets Operator is installed (README step 4A).
   enabled: false
-  # terraform -chdir=terraform/rds output -raw db_master_secret_arn (an ARN, not a secret)
+  # `db_master_secret_arn` from the outputs job (an ARN, not a secret), see README step 4.
   remoteSecretId: ""
 
 # -----------------------------------------------------------------------------------------

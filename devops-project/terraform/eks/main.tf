@@ -27,6 +27,22 @@ module "eks" {
   # Without this the helm provider cannot authenticate to install Argo CD.
   enable_cluster_creator_admin_permissions = true
 
+  # People who should use kubectl (your IAM user or SSO role), from the environment's
+  # eks.yml. The identity that runs Terraform (AWX) is already admin through the line above,
+  # so do not list it again.
+  access_entries = {
+    for index, arn in var.cluster_admin_principal_arns : "admin-${index}" => {
+      principal_arn = arn
+
+      policy_associations = {
+        admin = {
+          policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = { type = "cluster" }
+        }
+      }
+    }
+  }
+
   eks_managed_node_groups = {
     default = {
       # Use our own role (iam.tf) instead of letting the module create one.
