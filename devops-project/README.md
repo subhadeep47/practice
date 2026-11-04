@@ -9,7 +9,7 @@ folder only holds infrastructure and delivery.
 - **Ansible** owns every environment-specific value (one folder per environment: `dev`,
   `prod`), passes them to Terraform and runs the stacks in the right order.
 - **Helm** packages the Spring Boot backend for Kubernetes.
-- **Argo CD** deploys the chart to EKS from git (GitOps).
+- **Argo CD** deploys dev from git (GitOps); **Ansible** deploys production image updates to EKS.
 - **Not built yet:** GitHub Actions CI, Prometheus/Grafana monitoring (see [What's next](#whats-next)).
 
 ## Contents
@@ -26,11 +26,12 @@ folder only holds infrastructure and delivery.
 10. [Step 5 - Bootstrap Argo CD and deploy the backend](#step-5---bootstrap-argo-cd-and-deploy-the-backend)
 11. [Step 6 - Deploy the frontend](#step-6---deploy-the-frontend)
 12. [Step 7 - Continuous integration](#step-7---continuous-integration)
-13. [Day-2 operations](#day-2-operations)
-14. [Tear down](#tear-down)
-15. [Troubleshooting](#troubleshooting)
-16. [Design decisions](#design-decisions)
-17. [What's next](#whats-next)
+13. [Production image deployment](#production-image-deployment)
+14. [Day-2 operations](#day-2-operations)
+15. [Tear down](#tear-down)
+16. [Troubleshooting](#troubleshooting)
+17. [Design decisions](#design-decisions)
+18. [What's next](#whats-next)
 
 ## Architecture
 
@@ -48,13 +49,13 @@ folder only holds infrastructure and delivery.
     private subnets: EKS worker nodes ── Spring Boot pods ──> RDS PostgreSQL
                           |                                    (only reachable
                      Argo CD (namespace argocd)                 from the nodes)
-                     watches this git repo and syncs the chart
+                     watches dev; prod is deployed by Ansible
 ```
 
-Delivery flow: a push to the backend repository -> GitHub Actions tests, builds and pushes the
-image to ECR, then commits the new tag to `values-dev.yaml` here -> Argo CD notices (within
-about 3 minutes) -> renders `helm/spring-boot-backend` with that file -> applies it to the
-cluster, where the nodes pull the image from ECR.
+Dev delivery flow: a push to the backend repository -> GitHub Actions tests, builds and pushes
+the image to ECR, then commits the new tag to `values-dev.yaml` here -> Argo CD syncs dev.
+Production delivery is explicit: push an image to prod ECR, then run the production Ansible
+playbook with that image tag.
 
 ## Repository layout
 
@@ -66,11 +67,12 @@ devops-project/
 │   │   ├── dev/             ALL values of the dev environment
 │   │   │   ├── hosts.yml
 │   │   │   └── group_vars/all/   main.yml (env, region, state), vpc.yml, eks.yml,
-│   │   │                         rds.yml, s3_cloudfront.yml
-│   │   └── prod/            same files, prod values
+│   │   │                         rds.yml, ecr.yml, s3_cloudfront.yml
+│   │   └── prod/            same files, with prod infrastructure values
 │   ├── playbooks/
 │   │   ├── 01-provision-infrastructure.yml   run Terraform for all stacks, in order
 │   │   ├── 02-show-outputs.yml               print the outputs of all stacks
+│   │   ├── 03-deploy-prod-image.yml           deploy an image to prod EKS
 │   │   ├── 99-destroy-infrastructure.yml     destroy all stacks, reverse order
 │   │   ├── roles -> ../roles                 symlink so AWX finds the role (see below)
 │   │   └── vars/stacks.yml                   stack order (structure, not configuration)
@@ -99,12 +101,15 @@ The link makes the role found in both AWX and the command line.
 
 ## Environments and configuration
 
-**Rule: Terraform has no environment-specific content; Ansible has all of it.**
+**Terraform has no environment-specific content.** Ansible inventories own infrastructure
+configuration and credentials; each environment's Helm values file owns its Kubernetes
+application configuration.
 
 - An environment is an Ansible inventory folder: `ansible/inventories/dev`,
   `ansible/inventories/prod`. You choose it with `-i`, and there is deliberately no default,
   so a forgotten flag can never touch the wrong environment.
-- Everything that differs between environments is in that folder's `group_vars/all/`:
+- Infrastructure settings that differ between environments are in that folder's
+  `group_vars/all/`:
 
   | File | Contents |
   |---|---|
@@ -112,6 +117,7 @@ The link makes the role found in both AWX and the command line.
   | `vpc.yml` | `tf_vars_vpc`: CIDRs, availability zones, single or per-AZ NAT |
   | `eks.yml` | `tf_vars_eks`: Kubernetes version, node types and counts, API endpoint access, Argo CD chart version |
   | `rds.yml` | `tf_vars_rds`: instance class, storage, engine version, multi-AZ, backups, snapshot and deletion protection, DB name and user |
+  | `ecr.yml` | `tf_vars_ecr`: image repository name and CI push-role configuration |
   | `s3_cloudfront.yml` | `tf_vars_s3_cloudfront`: bucket name prefix, price class |
 
 - On every run the `terraform_runner` role merges `tf_vars_common` with the stack's own
@@ -130,9 +136,10 @@ The link makes the role found in both AWX and the command line.
 - The playbooks default to `tf_action=plan`, which changes nothing. Changing infrastructure
   is always two deliberate steps, in every environment: a plan job, a human approval, then an
   apply job.
-- What is **not** in Ansible: the Kubernetes side. Argo CD deploys from git, so per-environment
-  chart values stay in git next to the chart (`helm/spring-boot-backend/values-<env>.yaml`)
-  and the Argo CD applications in `argocd/apps/`.
+- Kubernetes release configuration is environment-specific Helm configuration:
+  dev values live in `helm/spring-boot-backend/values-dev.yaml`; production values live in
+  `helm/spring-boot-backend/values-prod.yaml`. Ansible chooses the prod cluster and applies
+  those values with the image tag supplied at launch.
 
 **Add an environment** (for example `staging`): copy `ansible/inventories/dev` to
 `ansible/inventories/staging`, change `env_name`, `key_prefix` and the values, then run the
@@ -460,6 +467,10 @@ adopted by changing `argocd_chart_version` in `ansible/inventories/<env>/group_v
 Its UI is not exposed publicly.
 The repository is public, so Argo CD needs no git credentials.
 
+**This step is for dev only.** Do not apply `argocd/root-app.yaml` to the production cluster:
+the root app includes the `backend-dev` Application. Production releases are managed by the
+Ansible playbook in [Production image deployment](#production-image-deployment).
+
 ### 5.1 Open the Argo CD UI
 
 ```bash
@@ -584,7 +595,35 @@ aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --
 docker build -t $REPO:manual-1 . && docker push $REPO:manual-1
 ```
 
-Then set `image.tag: manual-1` in `values-dev.yaml` and push to this repository.
+Then set `image.tag: manual-1` in `values-dev.yaml` and push to this repository to release to dev.
+
+## Production image deployment
+
+Production image updates are explicit Ansible runs; the backend CI workflow only updates the
+dev tag. First fill in `image.repository` and `database.host` in
+`helm/spring-boot-backend/values-prod.yaml` using the prod `repository_url` and `db_endpoint`
+from the outputs playbook. All other production Kubernetes settings belong in that file too.
+Build and push the production image to the production ECR repository, then deploy its immutable
+tag. Ansible verifies the tag exists and runs Helm with `values-prod.yaml`; only the new image
+tag is passed on the command line. A failed rollout is rolled back by Helm (`--atomic`).
+
+```bash
+ansible-playbook \
+  -i ansible/inventories/prod \
+  ansible/playbooks/03-deploy-prod-image.yml \
+  -e image_tag=<image-tag>
+```
+
+In AWX, create a prod-only job template using `03-deploy-prod-image.yml`, the prod inventory,
+production AWS credentials, and a required survey variable named `image_tag`. The execution
+environment needs Ansible, AWS CLI v2, and Helm. Use an image tag that has already been pushed
+to the prod ECR repository. The production database Secret `backend-db` must exist in the
+`ecommerce` namespace before the first deployment; credentials are not passed through Terraform
+or this playbook.
+
+Do not bootstrap `argocd/root-app.yaml` on the production cluster: it discovers the dev
+Application in `argocd/apps/` and would otherwise deploy the dev release there. Argo CD may be
+installed by the EKS Terraform stack, but it does not manage the production backend.
 
 **Checks on this repository.** `.github/workflows/devops-project-ci.yml` runs on every pull
 request and push that touches `devops-project/`: `terraform fmt` and `validate` for every
@@ -594,19 +633,23 @@ playbook for both environments, and a YAML lint. It never touches AWS or the clu
 ## Day-2 operations
 
 **Release a new backend version.** Push to the backend repository's `main`: CI builds the image
-and commits the new tag to `values-dev.yaml` (step 7). Argo CD syncs within about 3 minutes
-(or press *Refresh* then *Sync* in the UI). To release by hand, push an image and set the tag
-in `values-dev.yaml` yourself.
+and commits the new tag to `values-dev.yaml` (step 7), then Argo CD syncs dev within about
+3 minutes. For production, push the image to prod ECR and run
+`03-deploy-prod-image.yml` with its tag (see [Production image deployment](#production-image-deployment)).
 
-**Roll back.** `git revert <commit> && git push origin main`. (The UI's *Rollback* button is
-disabled while auto-sync is on, and git stays the source of truth.)
+**Roll back dev.** `git revert <commit> && git push origin main`. (The UI's *Rollback* button
+is disabled while auto-sync is on, and git stays the source of truth.) For prod, use
+`helm history backend -n ecommerce` and `helm rollback backend <revision> -n ecommerce` with
+the prod kubeconfig; then deploy the selected image tag through Ansible to keep the release
+repeatable.
 
-**Change cluster state.** Edit files in git, not with `kubectl`: self-heal reverts manual
-edits. For a temporary manual change, pause auto-sync on `backend-dev` in the UI first.
+**Change cluster state.** For dev, edit files in git, not with `kubectl`: self-heal reverts
+manual edits. For a temporary manual change, pause auto-sync on `backend-dev` in the UI first.
 
-**Add an environment or app.** Add a `values-<env>.yaml`, copy `argocd/apps/backend-dev.yaml`
-to a new file and change the name, values file and namespace (and add the namespace to the
-`ecommerce` project's `destinations`). Argo CD picks it up from `argocd/apps/`.
+**Add an environment or app.** For an Argo CD-managed environment, add a
+`values-<env>.yaml`, copy `argocd/apps/backend-dev.yaml` to a new file and change the name,
+values file and namespace. For an Ansible-deployed environment, add its Helm values file and
+configure a corresponding explicit deployment playbook.
 
 **Change infrastructure.** For a value (size, CIDR, version, backup days, ...) edit the
 environment's file in `ansible/inventories/<env>/group_vars/all/`; for structure edit the
@@ -746,9 +789,9 @@ then destroy.
   controller keeps the manual IRSA route (`eksctl create iamserviceaccount`), which shows the
   other mechanism and keeps its large AWS-published policy out of this repository. Either can
   be moved to the other method later.
-- **Add-ons by hand, workloads by Argo CD.** The load balancer controller and External
-  Secrets Operator are one-time Helm installs per cluster. Everything application-related is
-  deployed by Argo CD from git.
+- **Separate delivery by environment.** The load balancer controller and External Secrets
+  Operator are one-time Helm installs per cluster. Dev application releases are deployed by
+  Argo CD from git; production releases use the explicit Ansible playbook.
 - **Argo CD itself is managed by Terraform**, which avoids Argo CD managing its own
   installation. Upgrade it through `argocd_chart_version` in the environment's `eks.yml`.
 - **Backend is public over HTTP for now.** The ALB serves plain HTTP on its own DNS name.
@@ -761,6 +804,5 @@ then destroy.
    another Argo CD application), with Spring Boot metrics from Actuator.
 3. **HTTPS and a domain:** a Route 53 record and an ACM certificate for the ALB (annotations
    are prepared in `values.yaml`), CORS for the frontend origin.
-4. **Prod:** review the starting values in `ansible/inventories/prod`, give it its own AWS
-   account/profile and state bucket, then add `values-prod.yaml` and a `backend-prod`
-   Argo CD application (see Day-2 operations).
+4. **Production image promotion:** automate copying a tested image to prod ECR while keeping
+   the production deployment itself gated by an explicit Ansible run.
