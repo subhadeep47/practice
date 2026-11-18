@@ -48,7 +48,7 @@ variable "min_size" {
 
 variable "cluster_admin_principal_arns" {
   type        = list(string)
-  description = "IAM users or roles (ARNs) that get cluster-admin access with kubectl, in addition to the identity that runs Terraform. Use [] for none."
+  description = "IAM users or roles (ARNs) that get cluster-admin access with kubectl, in addition to the role Terraform runs as. Use [] for none."
 }
 
 variable "argocd_chart_version" {
@@ -59,4 +59,9 @@ variable "argocd_chart_version" {
 variable "argocd_server_service_type" {
   type        = string
   description = "Service type for the Argo CD server. ClusterIP = reach via kubectl port-forward; LoadBalancer = public endpoint."
+}
+
+variable "terraform_role_arn" {
+  type        = string
+  description = "IAM role Terraform assumes for every AWS call (created once by bootstrap/terraform-access.yaml, passed in by Ansible)"
 }

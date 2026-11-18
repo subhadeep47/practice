@@ -40,3 +40,8 @@ variable "github_oidc_subjects" {
   type        = list(string)
   description = "Which GitHub workflows may push images, as OIDC subject patterns, e.g. [\"repo:my-user/my-backend:ref:refs/heads/main\"]"
 }
+
+variable "terraform_role_arn" {
+  type        = string
+  description = "IAM role Terraform assumes for every AWS call (created once by bootstrap/terraform-access.yaml, passed in by Ansible)"
+}

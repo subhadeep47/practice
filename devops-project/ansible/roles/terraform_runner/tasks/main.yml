@@ -25,6 +25,17 @@
       inventory of an environment (AWX) or -i ansible/inventories/<env> (CLI).
     quiet: true
 
+# Fail early, with a clear message, instead of a confusing AWS error half way through a run.
+- name: Validate the Terraform role ARN
+  ansible.builtin.assert:
+    that: (tf_stack_vars.terraform_role_arn | default('')) is match('^arn:aws:iam::[0-9]{12}:role/.+')
+    fail_msg: >-
+      terraform_role_arn is not a role ARN ('{{ tf_stack_vars.terraform_role_arn | default('') }}').
+      Set aws_account_id in ansible/inventories/{{ env_name }}/group_vars/all/main.yml to the
+      12-digit account id, and create the role first with bootstrap/terraform-access.yaml
+      (README step 0).
+    quiet: true
+
 - name: "Terraform {{ tf_action }}: {{ tf_service }} ({{ env_name }})"
   environment: "{{ {'TF_IN_AUTOMATION': '1'} | combine(tf_process_env) }}"
   vars:
@@ -53,9 +64,25 @@
       changed_when: false
       no_log: true  # keeps values out of the log, in case a secret is added later
 
+    # Needed for every action (output reads the state too).
+    - name: Create a temporary backend config file
+      ansible.builtin.tempfile:
+        state: file
+        prefix: "tfbackend-{{ env_name }}-{{ tf_service }}-"
+        suffix: .hcl
+      register: tf_backend_file
+      changed_when: false
+
+    - name: Write the state location and the role used to reach it
+      ansible.builtin.copy:
+        dest: "{{ tf_backend_file.path }}"
+        content: "{{ tf_backend_config_content }}"
+        mode: "0600"
+      changed_when: false
+
     - name: "Initialize Terraform in {{ tf_service }} (state of environment {{ env_name }})"
       ansible.builtin.command:
-        argv: "{{ [tf_bin, 'init', '-input=false', '-reconfigure'] + tf_backend_args }}"
+        argv: "{{ [tf_bin, 'init', '-input=false', '-reconfigure', '-backend-config=' ~ tf_backend_file.path] }}"
         chdir: "{{ tf_dir }}"
       changed_when: false
 
@@ -93,4 +120,11 @@
         path: "{{ tf_varfile.path }}"
         state: absent
       when: tf_action != 'output' and tf_varfile.path is defined
+      changed_when: false
+
+    - name: Remove the temporary backend config file
+      ansible.builtin.file:
+        path: "{{ tf_backend_file.path }}"
+        state: absent
+      when: tf_backend_file.path is defined
       changed_when: false

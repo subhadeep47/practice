@@ -25,3 +25,8 @@ variable "price_class" {
   type        = string
   description = "CloudFront price class (PriceClass_100 = US, Canada, Europe)"
 }
+
+variable "terraform_role_arn" {
+  type        = string
+  description = "IAM role Terraform assumes for every AWS call (created once by bootstrap/terraform-access.yaml, passed in by Ansible)"
+}

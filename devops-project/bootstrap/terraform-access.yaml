@@ -1,0 +1,259 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  One-time bootstrap for one environment: the IAM role Terraform assumes to build the
+  infrastructure (terraform-provisioner-<env>) and the IAM user that may assume it
+  (terraform-runner-<env>, only used by AWX). Deployed BY HAND by an administrator, because
+  Terraform cannot create the access it needs to run. See devops-project/README.md, step 0.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9-]{1,14}$"
+    Description: Environment name; must equal env_name in ansible/inventories/<env> (dev, prod).
+  ProjectName:
+    Type: String
+    Default: fullstack-app
+    Description: Must equal tf_vars_common.project. Limits the role to ECR repositories named <project>/*.
+  StateBucketName:
+    Type: String
+    Description: The S3 bucket that holds Terraform state (tf_backend.bucket).
+  StateKeyPrefix:
+    Type: String
+    Default: devops-project
+    Description: First part of tf_backend.key_prefix (the part before /<env>).
+  FrontendBucketPrefix:
+    Type: String
+    Default: mycompany-react-frontend
+    Description: Must equal bucket_name_prefix in s3_cloudfront.yml. Limits the role to buckets named <prefix>-*.
+  WorkloadRegions:
+    Type: CommaDelimitedList
+    Default: us-east-1
+    Description: Regions where Terraform may create resources (aws_region of the environment).
+
+Resources:
+  # ---------------------------------------------------------------------------------------
+  # The identity AWX logs in with. It has no permissions of its own: the role's trust policy
+  # names it, and that is all it can do (assume the role). Create its access key by hand.
+  # ---------------------------------------------------------------------------------------
+  RunnerUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Sub "terraform-runner-${Environment}"
+
+  # ---------------------------------------------------------------------------------------
+  # The role Terraform assumes (provider "aws" assume_role, the S3 backend and the EKS login).
+  # ---------------------------------------------------------------------------------------
+  TerraformRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "terraform-provisioner-${Environment}"
+      Description: !Sub "Assumed by Terraform (through AWX) to build the ${Environment} infrastructure"
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt RunnerUser.Arn
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref StatePolicy
+        - !Ref NetworkComputePolicy
+        - !Ref DataPolicy
+        - !Ref IamPolicy
+
+  # ---------------------------------------------------------------------------------------
+  # 1. Terraform state: only this environment's state files.
+  # ---------------------------------------------------------------------------------------
+  StatePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "terraform-state-${Environment}"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Without ListBucket, S3 answers 403 instead of 404 for a state file that does not
+          # exist yet, and the first init of a new stack fails.
+          - Sid: ListStateBucket
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub "arn:aws:s3:::${StateBucketName}"
+          - Sid: ThisEnvironmentsState
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub "arn:aws:s3:::${StateBucketName}/${StateKeyPrefix}/${Environment}/*"
+
+  # ---------------------------------------------------------------------------------------
+  # 2. VPC, EKS and the things the EKS module creates around them.
+  # ---------------------------------------------------------------------------------------
+  NetworkComputePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "terraform-network-compute-${Environment}"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: VpcEksAndSupportingServices
+            Effect: Allow
+            Action:
+              - ec2:*
+              - eks:*
+              - logs:*
+              - kms:*
+              - autoscaling:Describe*
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !Ref WorkloadRegions
+
+  # ---------------------------------------------------------------------------------------
+  # 3. Database, frontend hosting, image registry.
+  # ---------------------------------------------------------------------------------------
+  DataPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "terraform-data-${Environment}"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Rds
+            Effect: Allow
+            Action: rds:*
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !Ref WorkloadRegions
+          # RDS creates and manages the master password secret on Terraform's behalf. The role
+          # can create and describe it but deliberately NOT read its value (no GetSecretValue).
+          - Sid: RdsManagedMasterSecret
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+              - secretsmanager:UpdateSecret
+              - secretsmanager:TagResource
+              - secretsmanager:UntagResource
+              - secretsmanager:GetResourcePolicy
+              - secretsmanager:PutResourcePolicy
+              - secretsmanager:DeleteResourcePolicy
+            Resource: !Sub "arn:aws:secretsmanager:*:${AWS::AccountId}:secret:rds!*"
+          - Sid: FrontendBuckets
+            Effect: Allow
+            Action: s3:*
+            Resource:
+              - !Sub "arn:aws:s3:::${FrontendBucketPrefix}-*"
+              - !Sub "arn:aws:s3:::${FrontendBucketPrefix}-*/*"
+          # CloudFront cannot be limited to named resources when creating them.
+          - Sid: CloudFront
+            Effect: Allow
+            Action: cloudfront:*
+            Resource: "*"
+          - Sid: EcrRepositories
+            Effect: Allow
+            Action: ecr:*
+            Resource: !Sub "arn:aws:ecr:*:${AWS::AccountId}:repository/${ProjectName}/*"
+
+  # ---------------------------------------------------------------------------------------
+  # 4. IAM: the sensitive part. Reading is allowed everywhere; changing is limited to the roles
+  #    and policies this project creates (named app-cluster-<env>-* and github-ci-ecr-push-<env>),
+  #    and only the listed managed policies may be attached to them. So this role can NOT attach
+  #    AdministratorAccess or touch any other role in the account.
+  # ---------------------------------------------------------------------------------------
+  IamPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "terraform-iam-${Environment}"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadIam
+            Effect: Allow
+            Action:
+              - iam:Get*
+              - iam:List*
+            Resource: "*"
+          - Sid: ManageProjectRoles
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:UpdateAssumeRolePolicy
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:PassRole
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/app-cluster-${Environment}-*"
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/github-ci-ecr-push-${Environment}"
+          - Sid: AttachOnlyKnownPolicies
+            Effect: Allow
+            Action:
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/app-cluster-${Environment}-*"
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/github-ci-ecr-push-${Environment}"
+            Condition:
+              ArnLike:
+                iam:PolicyARN:
+                  - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+                  - arn:aws:iam::aws:policy/AmazonEKSVPCResourceController
+                  - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+                  - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+                  - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:policy/app-cluster-${Environment}-*"
+          - Sid: ManageProjectPolicies
+            Effect: Allow
+            Action:
+              - iam:CreatePolicy
+              - iam:DeletePolicy
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicyVersion
+              - iam:SetDefaultPolicyVersion
+              - iam:TagPolicy
+              - iam:UntagPolicy
+            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:policy/app-cluster-${Environment}-*"
+          # The EKS IRSA provider (one per cluster) and the GitHub Actions provider (one per account).
+          - Sid: ManageOidcProviders
+            Effect: Allow
+            Action:
+              - iam:CreateOpenIDConnectProvider
+              - iam:DeleteOpenIDConnectProvider
+              - iam:TagOpenIDConnectProvider
+              - iam:UntagOpenIDConnectProvider
+              - iam:UpdateOpenIDConnectProviderThumbprint
+              - iam:AddClientIDToOpenIDConnectProvider
+              - iam:RemoveClientIDFromOpenIDConnectProvider
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/oidc.eks.*"
+              - !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+          # EKS, node groups, RDS and similar services create their own service-linked roles
+          # the first time they are used in an account.
+          - Sid: ServiceLinkedRoles
+            Effect: Allow
+            Action: iam:CreateServiceLinkedRole
+            Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName:
+                  - eks.amazonaws.com
+                  - eks-nodegroup.amazonaws.com
+                  - rds.amazonaws.com
+                  - autoscaling.amazonaws.com
+                  - elasticloadbalancing.amazonaws.com
+                  - cloudfront.amazonaws.com
+
+Outputs:
+  TerraformRoleArn:
+    Description: Put this in terraform_role_arn (ansible/inventories/<env>/group_vars/all/main.yml)
+    Value: !GetAtt TerraformRole.Arn
+  RunnerUserName:
+    Description: Create its access key by hand and store it in the AWX credential (README step 0)
+    Value: !Ref RunnerUser

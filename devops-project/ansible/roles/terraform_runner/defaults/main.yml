@@ -22,6 +22,7 @@ tf_bin: terraform
 # Folder containing the stacks (vpc, eks, rds, s3-cloudfront)
 tf_root: "{{ playbook_dir }}/../../terraform"
 
-# Extra environment variables for the terraform process, e.g. {AWS_PROFILE: dev-account}.
-# Environments override this in their group_vars.
+# Extra environment variables for the terraform / aws processes. They select the RUNNER identity
+# (the one that is allowed to assume the Terraform role), e.g. {AWS_PROFILE: terraform-runner-dev}.
+# In AWX the AWS credential does this and the value stays empty. Environments override it.
 tf_process_env: {}

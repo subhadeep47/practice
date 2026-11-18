@@ -65,3 +65,8 @@ variable "db_username" {
   type        = string
   description = "Database master username"
 }
+
+variable "terraform_role_arn" {
+  type        = string
+  description = "IAM role Terraform assumes for every AWS call (created once by bootstrap/terraform-access.yaml, passed in by Ansible)"
+}
