@@ -18,19 +18,20 @@ folder only holds infrastructure and delivery.
 2. [Repository layout](#repository-layout)
 3. [Environments and configuration](#environments-and-configuration)
 4. [Prerequisites](#prerequisites)
-5. [Step 1 - Provision the infrastructure](#step-1---provision-the-infrastructure)
-6. [Step 2 - Connect to the cluster](#step-2---connect-to-the-cluster)
-7. [How pods get AWS permissions](#how-pods-get-aws-permissions)
-8. [Step 3 - AWS Load Balancer Controller](#step-3---aws-load-balancer-controller)
-9. [Step 4 - Database credentials](#step-4---database-credentials)
-10. [Step 5 - Bootstrap Argo CD and deploy the backend](#step-5---bootstrap-argo-cd-and-deploy-the-backend)
-11. [Step 6 - Deploy the frontend](#step-6---deploy-the-frontend)
-12. [Step 7 - Continuous integration](#step-7---continuous-integration)
-13. [Day-2 operations](#day-2-operations)
-14. [Tear down](#tear-down)
-15. [Troubleshooting](#troubleshooting)
-16. [Design decisions](#design-decisions)
-17. [What's next](#whats-next)
+5. [Step 0 - One-time AWS access setup (the Terraform role)](#step-0---one-time-aws-access-setup-the-terraform-role)
+6. [Step 1 - Provision the infrastructure](#step-1---provision-the-infrastructure)
+7. [Step 2 - Connect to the cluster](#step-2---connect-to-the-cluster)
+8. [How pods get AWS permissions](#how-pods-get-aws-permissions)
+9. [Step 3 - AWS Load Balancer Controller](#step-3---aws-load-balancer-controller)
+10. [Step 4 - Database credentials](#step-4---database-credentials)
+11. [Step 5 - Bootstrap Argo CD and deploy the backend](#step-5---bootstrap-argo-cd-and-deploy-the-backend)
+12. [Step 6 - Deploy the frontend](#step-6---deploy-the-frontend)
+13. [Step 7 - Continuous integration](#step-7---continuous-integration)
+14. [Day-2 operations](#day-2-operations)
+15. [Tear down](#tear-down)
+16. [Troubleshooting](#troubleshooting)
+17. [Design decisions](#design-decisions)
+18. [What's next](#whats-next)
 
 ## Architecture
 
@@ -75,6 +76,7 @@ devops-project/
 │   │   ├── roles -> ../roles                 symlink so AWX finds the role (see below)
 │   │   └── vars/stacks.yml                   stack order (structure, not configuration)
 │   └── roles/terraform_runner/               values -> var file, init (S3 backend), plan/apply/destroy
+├── bootstrap/terraform-access.yaml   one-time, by hand: the role Terraform assumes + the AWX user (step 0)
 ├── terraform/           structure only: variables have no defaults, there are no tfvars
 │   ├── vpc/             VPC, subnets, NAT                    (apply 1st)
 │   ├── eks/             EKS cluster + Argo CD (Helm)         (apply 2nd)
@@ -108,7 +110,7 @@ The link makes the role found in both AWX and the command line.
 
   | File | Contents |
   |---|---|
-  | `main.yml` | `env_name`, region, the S3 state location (`tf_backend`), values shared by all stacks (`tf_vars_common`: environment, project, region), optional `tf_process_env` (e.g. `AWS_PROFILE` for a separate AWS account) |
+  | `main.yml` | `env_name`, region, `aws_account_id`, `terraform_role_arn` (the role Terraform assumes, step 0), the S3 state location (`tf_backend`), values shared by all stacks (`tf_vars_common`: environment, project, region, role ARN), optional `tf_process_env` |
   | `vpc.yml` | `tf_vars_vpc`: CIDRs, availability zones, single or per-AZ NAT |
   | `eks.yml` | `tf_vars_eks`: Kubernetes version, node types and counts, API endpoint access, Argo CD chart version |
   | `rds.yml` | `tf_vars_rds`: instance class, storage, engine version, multi-AZ, backups, snapshot and deletion protection, DB name and user |
@@ -170,9 +172,10 @@ Provisioning is meant to run from AWX, not from a laptop. Set up once per enviro
    and `group_vars/all/*.yml`, so every `env_name`, `tf_backend` and `tf_vars_*` value comes
    from the environment folder. Do the same for prod with `.../inventories/prod`. Enable
    *Update on launch* so a push is picked up.
-3. **Credentials:** an *Amazon Web Services* credential for the environment's account (its
-   keys become environment variables of the job and reach Terraform), or run the job where an
-   IAM role is attached.
+3. **Credentials:** an *Amazon Web Services* credential holding the access key of the
+   environment's **runner user** `terraform-runner-<env>` (created in step 0). That user can do
+   nothing except assume the Terraform role; Terraform then works as that role. Attach it to
+   every job template of the environment.
 4. **Execution environment:** it must contain `terraform` >= 1.10 and the `aws` CLI v2 (the
    EKS stack's Helm provider calls `aws eks get-token`). Build a custom execution environment
    image if yours does not.
@@ -216,11 +219,12 @@ the command line): `ansible`, `terraform` >= 1.10 and the `aws` CLI v2. The `aws
 needed there too, because the EKS stack's Helm provider uses `aws eks get-token` to reach the
 cluster.
 
-AWS: credentials for an IAM identity that can create VPC, EKS, RDS, IAM, S3, CloudFront
-and Secrets Manager resources (check with `aws sts get-caller-identity`). The identity that
-runs Terraform (the AWX credential) becomes cluster admin automatically. **Your own IAM user or
-SSO role does not**, so list it in `cluster_admin_principal_arns` in the environment's `eks.yml`
-before step 1 (otherwise `kubectl` says "unauthorized" in step 2).
+AWS: an administrator identity of your own, used **only for step 0** (creating the Terraform
+role); check it with `aws sts get-caller-identity`. After that, Terraform never uses it: it
+runs as the role `terraform-provisioner-<env>`, reached through the AWX runner user. That role
+becomes cluster admin automatically. **Your own IAM user or SSO role does not**, so list it in
+`cluster_admin_principal_arns` in the environment's `eks.yml` before step 1 (otherwise
+`kubectl` says "unauthorized" in step 2).
 
 **Terraform state bucket.** State is stored in the S3 bucket `subhadeep-terraform-state-bucket`
 (eu-north-1), created by the `remote-backend-terraform/` folder at the repository root.
@@ -239,6 +243,77 @@ Consider turning on versioning for the bucket.
 | Backend image, DB host, secret settings | `helm/spring-boot-backend/values-dev.yaml` (step 5) |
 
 Everything below is run from the `devops-project` folder.
+
+## Step 0 - One-time AWS access setup (the Terraform role)
+
+Terraform does not run as a person or as a broad AWX user. Every AWS call it makes, and every
+access to its state in S3, is done as one IAM role, `terraform-provisioner-<env>`, which it
+**assumes** (`assume_role` in each stack's `provider "aws"`, in the S3 backend, and in the
+`aws eks get-token` login of the Helm provider). AWX holds the access key of a separate user,
+`terraform-runner-<env>`, that has no permissions except to assume that role. The role's ARN
+reaches Terraform as the variable `terraform_role_arn`, which comes from the environment
+inventory like every other value.
+
+The role and the user cannot be created by the Terraform that needs them, so they are created
+**once, by hand, by an administrator**, from `bootstrap/terraform-access.yaml` (CloudFormation:
+nothing to install, no state to keep, easy to review). Per environment:
+
+```bash
+ENV=dev
+aws cloudformation deploy --region us-east-1 --stack-name terraform-access-$ENV \
+  --template-file bootstrap/terraform-access.yaml --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides Environment=$ENV StateBucketName=subhadeep-terraform-state-bucket
+aws cloudformation describe-stacks --stack-name terraform-access-$ENV --query 'Stacks[0].Outputs'
+```
+
+1. Put your 12-digit account id (`aws sts get-caller-identity --query Account --output text`)
+   into `aws_account_id` in `ansible/inventories/$ENV/group_vars/all/main.yml`, and push. The
+   run refuses to start while it still says `REPLACE_WITH_ACCOUNT_ID`.
+2. Create the runner user's access key **once** and put it in AWX (*Credentials*, type
+   *Amazon Web Services*):
+
+   ```bash
+   aws iam create-access-key --user-name terraform-runner-$ENV
+   ```
+
+   The secret is shown only once. To rotate: create a second key, update AWX, delete the old key.
+3. Check that the user can assume the role (use the runner key as a profile):
+
+   ```bash
+   aws sts assume-role --profile terraform-runner-$ENV --role-session-name check \
+     --role-arn arn:aws:iam::<account-id>:role/terraform-provisioner-$ENV
+   ```
+
+Repeat for `prod` with `ENV=prod` (in the prod account if it has its own; the template has the
+same parameters). Optional template parameters: `ProjectName`, `StateKeyPrefix`,
+`FrontendBucketPrefix`, `WorkloadRegions`. They must equal the values in the inventory; the
+defaults match dev.
+
+**What the role may do** (four managed policies, one per area):
+
+| Policy | Allows |
+|---|---|
+| `terraform-state-<env>` | read/write **this environment's** state files only (`devops-project/<env>/*`) |
+| `terraform-network-compute-<env>` | EC2/VPC, EKS, CloudWatch Logs, KMS, in the allowed regions |
+| `terraform-data-<env>` | RDS (and creating its managed secret, but **not reading the password**), the frontend S3 buckets, CloudFront, ECR repositories named `<project>/*` |
+| `terraform-iam-<env>` | read IAM; create/change **only** roles named `app-cluster-<env>-*` and `github-ci-ecr-push-<env>`, and attach **only** the listed AWS managed policies and its own `app-cluster-<env>-*` policies, so it cannot attach `AdministratorAccess` or touch any other role |
+
+The IAM limits are the important ones: a role that can write IAM freely is an administrator. A
+residual risk remains (it could still give a role it creates broad inline permissions); closing it
+completely needs a *permissions boundary* on every role Terraform creates, a possible next step.
+
+**If a run fails with `AccessDenied` for some action:** the policy was written without running it
+against your account, so the first runs may need an addition. Find the denied action in the error
+(or in CloudTrail, event name and resource), add it to the matching policy in the template,
+redeploy with the same `aws cloudformation deploy` command, and re-run the job. Review each
+addition before deploying.
+
+**Sensitive permissions for one stack.** If one stack ever needs more than this role may do (for
+example IAM changes outside the project's names), create a second, narrowly scoped role the same
+way and set `terraform_role_arn` in **that stack's own file** (for example in `rds.yml`):
+a stack's value overrides the shared one from `main.yml`, for the provider, the state backend and
+the cluster login alike. The runner user must be named in that role's trust policy and the role
+needs the state policy too. Nothing in this repository needs this today.
 
 ## Step 1 - Provision the infrastructure
 
@@ -283,9 +358,8 @@ kubectl get nodes                  # nodes in Ready state (dev: 2)
 kubectl -n argocd get pods         # Argo CD pods Running
 ```
 
-Keep these variables in your shell for the next steps. If you set `AWS_PROFILE` in the
-environment's `tf_process_env`, export the same profile in your shell for `aws`, `eksctl` and
-`kubectl`.
+Keep these variables in your shell for the next steps. Your shell uses your own identity (the one
+you listed in `cluster_admin_principal_arns`), not the Terraform role or the runner user.
 
 ## How pods get AWS permissions
 
@@ -299,7 +373,7 @@ Connecting to the database needs no AWS permission: pods open a normal TCP conne
 | AWS Load Balancer Controller pod | create the ALB | its own role, **IRSA** | `eksctl`, by hand (step 3) |
 | External Secrets Operator pod | read the database secret | its own role, **EKS Pod Identity** | **Terraform**, `terraform/rds/external_secrets.tf` (step 4A only installs the operator) |
 | Spring Boot pods, Argo CD | nothing in AWS | none | |
-| AWX running Terraform | create the infrastructure | the AWX AWS credential | AWX |
+| AWX running Terraform | create the infrastructure | the runner user, which assumes the Terraform role | step 0 (`bootstrap/terraform-access.yaml`) |
 | GitHub Actions | push images to ECR | OIDC role | Terraform, `terraform/ecr` |
 
 Two ways to give a pod its own role are used on purpose, one of each:
@@ -642,6 +716,10 @@ helm -n reloader uninstall reloader
 ansible-playbook -i ansible/inventories/$ENV ansible/playbooks/99-destroy-infrastructure.yml -e destroy_confirmation=$ENV
 ```
 
+After the last destroy you can remove the access too: `aws cloudformation delete-stack --stack-name
+terraform-access-$ENV` (first delete the runner user's access key). Do this only when the
+environment is gone: Terraform needs the role for everything else, including the destroy itself.
+
 The `ecr` stack is destroyed with the others. In `dev` it has `force_delete: true`, so the
 repository goes even if it still holds images; `prod` keeps `false`, so empty it first.
 
@@ -673,6 +751,11 @@ then destroy.
 | `rds` plan fails with "couldn't find resource" for the EKS cluster | The `eks` stack is not applied yet (the External Secrets role looks the cluster up by name). |
 | Backend pods log "password authentication failed" some days after deploy | The 7-day rotation changed the password and the pods still hold the old one. Check Reloader is installed (`kubectl -n reloader get pods`), `reloader.enabled: true` in the values, and that Reloader uses the `annotations` strategy. Quick fix: `kubectl -n ecommerce rollout restart deploy/backend-spring-boot-backend`. |
 | `backend-dev` is OutOfSync because of `reloader.stakater.com/last-reloaded-from` | The `ignoreDifferences` block in `argocd/apps/backend-dev.yaml` is missing, or Reloader runs with the default `env-vars` strategy (reinstall with `--set reloader.reloadStrategy=annotations`). |
+| Run stops with "terraform_role_arn is not a role ARN" | `aws_account_id` in the environment's `main.yml` is still the placeholder, or the role does not exist yet (step 0). |
+| `AccessDenied` / "not authorized to perform sts:AssumeRole" when Terraform starts | The AWX credential is not the `terraform-runner-<env>` key of this environment, the account id in `main.yml` is wrong, or the role does not exist yet. Test with `aws sts assume-role` (step 0, point 3). |
+| `AccessDenied` on one AWS action during plan or apply | The Terraform role lacks it: see "If a run fails with AccessDenied" in step 0. |
+| Terraform init says it cannot read the state ("AccessDenied", "NoSuchBucket") | The state bucket in `tf_backend` is wrong or in another account, or `StateBucketName` / `StateKeyPrefix` given to the template differ from `tf_backend`. |
+| EKS apply fails at the Helm release with "Unauthorized" / "the server has asked for the client to provide credentials" | The cluster login did not use the Terraform role. Check `--role-arn` in `terraform/eks/provider.tf` and that the role (not another identity) created the cluster. |
 | Pods `CreateContainerConfigError`, secret `backend-db` not found | Step 4 not done, or the ExternalSecret is not ready: `kubectl -n ecommerce describe externalsecret`. |
 | Pods `ImagePullBackOff` | Wrong `image.repository` / `image.tag` (does that tag exist in ECR?), or the repository is in another account/registry. For ECR also check the node role has `AmazonEC2ContainerRegistryReadOnly` (command in `ci/README.md`). |
 | CI step "Configure AWS credentials" fails with "Not authorized to perform sts:AssumeRoleWithWebIdentity" | `github_oidc_subjects` in `ecr.yml` does not match the repository/branch running the workflow (it must read `repo:<owner>/<repo>:ref:refs/heads/main`), or the `ecr` stack was not applied after you changed it. |
@@ -740,6 +823,14 @@ then destroy.
 - **Least-privilege network.** RDS accepts connections only from the EKS node security
   group. The Argo CD UI is a ClusterIP service reached by port-forward, and Actuator is not
   routed through the ALB.
+- **Terraform assumes a role; it never runs as a person.** AWX holds only the key of a user that
+  can assume one role, and that role has the permissions. A leaked AWX key therefore cannot do
+  more than that role, every action in CloudTrail shows the role session
+  (`terraform-<env>-<stack>`), and prod's role is separate from dev's. The role ARN is a normal
+  variable from the inventory. The role and user are created by hand with CloudFormation because
+  Terraform cannot create the access it needs to run; one template per environment keeps that
+  to a single reviewable file. The role is scoped (this environment's state, named IAM roles,
+  allowed managed policies, no read access to the DB password) instead of being an administrator.
 - **Two ways of giving a pod an IAM role, on purpose.** The External Secrets role is plain
   Terraform (EKS Pod Identity): it sits next to the secret it may read, is reviewed like any
   other code, and needs no OIDC provider, annotation or manual `eksctl` step. The load balancer

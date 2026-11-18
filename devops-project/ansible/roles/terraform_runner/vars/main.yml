@@ -10,10 +10,17 @@ tf_stack_vars_name: "tf_vars_{{ tf_service | replace('-', '_') }}"
 # stack's own values. Written to a temporary JSON var file for the run.
 tf_stack_vars: "{{ tf_vars_common | combine(vars[tf_stack_vars_name]) }}"
 
-# Remote state location, handed to `terraform init`. One state file per environment and stack.
-tf_backend_args:
-  - "-backend-config=bucket={{ tf_backend.bucket }}"
-  - "-backend-config=key={{ tf_backend.key_prefix }}/{{ tf_service }}/terraform.tfstate"
-  - "-backend-config=region={{ tf_backend.region }}"
-  - "-backend-config=encrypt={{ tf_backend.encrypt | default(true) | string | lower }}"
-  - "-backend-config=use_lockfile={{ tf_backend.use_lockfile | default(true) | string | lower }}"
+# Remote state location and the role used to reach it, written to a temporary file that is given
+# to `terraform init -backend-config=<file>`. One state file per environment and stack. The S3
+# backend assumes the same Terraform role as the AWS provider (assume_role is a nested value, so
+# it cannot be passed as a simple key=value flag). The file holds no secrets.
+tf_backend_config_content: |
+  bucket       = "{{ tf_backend.bucket }}"
+  key          = "{{ tf_backend.key_prefix }}/{{ tf_service }}/terraform.tfstate"
+  region       = "{{ tf_backend.region }}"
+  encrypt      = {{ tf_backend.encrypt | default(true) | string | lower }}
+  use_lockfile = {{ tf_backend.use_lockfile | default(true) | string | lower }}
+  assume_role = {
+    role_arn     = "{{ tf_stack_vars.terraform_role_arn }}"
+    session_name = "terraform-{{ env_name }}-{{ tf_service }}"
+  }

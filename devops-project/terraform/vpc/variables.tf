@@ -40,3 +40,8 @@ variable "single_nat_gateway" {
   type        = bool
   description = "true = one shared NAT gateway (cheaper); false = one NAT gateway per public subnet (resilient)"
 }
+
+variable "terraform_role_arn" {
+  type        = string
+  description = "IAM role Terraform assumes for every AWS call (created once by bootstrap/terraform-access.yaml, passed in by Ansible)"
+}

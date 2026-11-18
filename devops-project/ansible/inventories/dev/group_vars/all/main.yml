@@ -8,8 +8,17 @@ env_name: dev
 # Region of this environment's resources (re-used by the stack values below).
 aws_region: us-east-1
 
-# Extra environment variables for terraform / the aws CLI. Use this when the environment
-# lives in its own AWS account, e.g.  AWS_PROFILE: my-dev-profile
+# AWS account of this environment. REPLACE the placeholder with the 12-digit account id.
+aws_account_id: "REPLACE_WITH_ACCOUNT_ID"
+
+# The role Terraform assumes for every AWS call. It is created once, by hand, with
+# bootstrap/terraform-access.yaml (README step 0); this is its ARN. The identity that starts
+# the run (the AWX AWS credential, terraform-runner-<env>) can do nothing but assume it.
+terraform_role_arn: "arn:aws:iam::{{ aws_account_id }}:role/terraform-provisioner-{{ env_name }}"
+
+# Extra environment variables for the terraform / aws processes. Normally empty: in AWX the
+# AWS credential supplies the runner identity. From the command line you can name a profile
+# of that runner identity here, e.g.  AWS_PROFILE: terraform-runner-dev
 tf_process_env: {}
 
 # Where Terraform keeps its state. The bucket must already exist (see README).
@@ -26,3 +35,6 @@ tf_vars_common:
   environment: "{{ env_name }}"
   project: fullstack-app
   aws_region: "{{ aws_region }}"
+  # Terraform assumes this role. To give ONE stack a different (more privileged) role, set
+  # terraform_role_arn in that stack's own file (e.g. rds.yml); it overrides this value.
+  terraform_role_arn: "{{ terraform_role_arn }}"
