@@ -1,0 +1,33 @@
+# Environment overrides for production.
+# These are the production Kubernetes and application settings, applied by the Ansible
+# deployment playbook rather than Argo CD.
+
+replicaCount: 3
+
+springProfile: prod
+
+image:
+  # Set this to the repository_url output from the prod ecr stack.
+  repository: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/fullstack-app/backend-prod
+  # The production Ansible playbook overrides this with the explicitly requested image tag.
+  tag: ""
+
+database:
+  # Set this to the db_endpoint output from the prod rds stack.
+  host: ""
+  name: appdb
+  existingSecret: backend-db
+
+reloader:
+  enabled: false
+
+externalSecret:
+  enabled: false
+  remoteSecretId: ""
+
+ingress:
+  enabled: true
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

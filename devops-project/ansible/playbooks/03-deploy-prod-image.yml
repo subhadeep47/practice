@@ -1,0 +1,112 @@
+---
+# Deploy an existing immutable ECR image to the production EKS cluster.
+# Run with the prod inventory and pass the image tag explicitly; this playbook is not for dev.
+- name: Deploy backend image to production EKS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    backend_chart_path: "{{ playbook_dir }}/../../helm/spring-boot-backend"
+    backend_values_path: "{{ backend_chart_path }}/values-prod.yaml"
+    backend_cluster_name: "app-cluster-{{ env_name }}"
+    backend_release_name: backend
+    backend_namespace: ecommerce
+    backend_helm_timeout: 10m
+
+  pre_tasks:
+    - name: Require the production inventory
+      ansible.builtin.assert:
+        that:
+          - env_name is defined
+          - env_name == 'prod'
+        fail_msg: "This playbook is production-only. Use -i ansible/inventories/prod."
+        quiet: true
+
+    - name: Require an existing image tag
+      ansible.builtin.assert:
+        that:
+          - image_tag is defined
+          - image_tag is string
+          - image_tag is match('^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$')
+        fail_msg: "Pass a valid, already-pushed ECR image tag with -e image_tag=<tag>."
+        quiet: true
+
+    - name: Require production ECR configuration
+      ansible.builtin.assert:
+        that:
+          - tf_vars_ecr.repository_name is defined
+          - aws_region is defined
+        fail_msg: "Production ECR settings are missing from the selected Ansible inventory."
+        quiet: true
+
+  tasks:
+    - name: Deploy backend release
+      block:
+        - name: Create temporary kubeconfig path
+          ansible.builtin.tempfile:
+            state: file
+            suffix: .kubeconfig
+          register: backend_kubeconfig
+
+        - name: Verify the image tag exists in production ECR
+          ansible.builtin.command:
+            argv:
+              - aws
+              - ecr
+              - describe-images
+              - --region
+              - "{{ aws_region }}"
+              - --repository-name
+              - "{{ tf_vars_ecr.repository_name }}"
+              - --image-ids
+              - "imageTag={{ image_tag }}"
+          changed_when: false
+
+        - name: Configure a temporary kubeconfig for the production cluster
+          ansible.builtin.command:
+            argv:
+              - aws
+              - eks
+              - update-kubeconfig
+              - --region
+              - "{{ aws_region }}"
+              - --name
+              - "{{ backend_cluster_name }}"
+              - --kubeconfig
+              - "{{ backend_kubeconfig.path }}"
+          changed_when: true
+
+        - name: Upgrade the production Helm release
+          ansible.builtin.command:
+            argv:
+              - helm
+              - upgrade
+              - --install
+              - "{{ backend_release_name }}"
+              - "{{ backend_chart_path }}"
+              - --namespace
+              - "{{ backend_namespace }}"
+              - --create-namespace
+              - --kubeconfig
+              - "{{ backend_kubeconfig.path }}"
+              - --values
+              - "{{ backend_values_path }}"
+              - --set-string
+              - "image.tag={{ image_tag }}"
+              - --atomic
+              - --wait
+              - --timeout
+              - "{{ backend_helm_timeout }}"
+          changed_when: true
+
+      always:
+        - name: Remove temporary kubeconfig
+          ansible.builtin.file:
+            path: "{{ backend_kubeconfig.path }}"
+            state: absent
+          when:
+            - backend_kubeconfig is defined
+            - backend_kubeconfig.path is defined
+
+      environment: "{{ tf_process_env | default({}) }}"

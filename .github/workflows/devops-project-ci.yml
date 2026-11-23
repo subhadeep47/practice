@@ -56,11 +56,16 @@ jobs:
 
       - uses: azure/setup-helm@v4
 
-      # values-dev.yaml leaves the DB host and image tag for you to fill in, and the chart
-      # refuses an empty host, so give both a dummy value here.
+      # Both environment values files leave the DB host and image tag for deployment-time
+      # configuration, and the chart refuses an empty host, so give both a dummy value here.
       - name: Lint
         run: >-
           helm lint helm/spring-boot-backend -f helm/spring-boot-backend/values-dev.yaml
+          --set database.host=ci.example.internal --set image.tag=ci
+
+      - name: Lint production values
+        run: >-
+          helm lint helm/spring-boot-backend -f helm/spring-boot-backend/values-prod.yaml
           --set database.host=ci.example.internal --set image.tag=ci
 
       - name: Render the chart
@@ -68,12 +73,18 @@ jobs:
           helm template backend helm/spring-boot-backend -f helm/spring-boot-backend/values-dev.yaml
           --set database.host=ci.example.internal --set image.tag=ci > "$RUNNER_TEMP/rendered.yaml"
 
+      - name: Render production values
+        run: >-
+          helm template backend helm/spring-boot-backend -f helm/spring-boot-backend/values-prod.yaml
+          --set database.host=ci.example.internal --set image.tag=ci > "$RUNNER_TEMP/rendered-prod.yaml"
+
       - name: Check the rendered manifests against the Kubernetes schemas
         run: |
           curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
             | tar -xz -C "$RUNNER_TEMP" kubeconform
           # Custom resources (ExternalSecret, Application) have no built-in schema: skipped.
-          "$RUNNER_TEMP/kubeconform" -strict -ignore-missing-schemas -kubernetes-version 1.31.0 -summary "$RUNNER_TEMP/rendered.yaml"
+          "$RUNNER_TEMP/kubeconform" -strict -ignore-missing-schemas -kubernetes-version 1.31.0 -summary \
+            "$RUNNER_TEMP/rendered.yaml" "$RUNNER_TEMP/rendered-prod.yaml"
 
   ansible:
     runs-on: ubuntu-latest
@@ -116,4 +127,6 @@ jobs:
         run: >-
           yamllint -d "{extends: relaxed, rules: {line-length: disable}}"
           ansible argocd k8s ci
-          helm/spring-boot-backend/values.yaml helm/spring-boot-backend/values-dev.yaml
+          helm/spring-boot-backend/values.yaml
+          helm/spring-boot-backend/values-dev.yaml
+          helm/spring-boot-backend/values-prod.yaml
