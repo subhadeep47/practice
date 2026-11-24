@@ -1,3 +1,12 @@
+# add awx-operator helm repo then update the repo, then run the below to deploy awx operator in the cluster
+# helm install awx-operator awx-operator/awx-operator --namespace awx --create-namespace
+# then apply postgres secret to use password protected postgres for awx
+# then deploy this awx-deployment yaml
+# to get password run below
+# kubectl get secret awx-server-admin-password -n awx -o jsonpath="{.data.password}" | base64 --decode; echo
+# to port forward to get ui access run below
+# kubectl port-forward svc/awx-server-service -n awx 8080:80
+
 apiVersion: awx.ansible.com/v1beta1
 kind: AWX
 metadata:
@@ -5,3 +14,4 @@ metadata:
   namespace: awx
 spec:
   service_type: nodeport
+  postgres_configuration_secret: awx-server-postgres-configurationa
